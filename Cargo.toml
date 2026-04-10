@@ -4,3 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.13", features = ["rustls"] }
+feed-rs = "2"
+article_scraper = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+epub-builder = "0.7"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+futures = "0.3"
+indicatif = "0.17"
+thiserror = "2"
