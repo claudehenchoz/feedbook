@@ -8,9 +8,6 @@ pub enum AppError {
     #[error("Feed parse error: {0}")]
     Feed(String),
 
-    #[error("Scraper error: {0}")]
-    Scraper(String),
-
     #[error("Database error: {0}")]
     Db(#[from] rusqlite::Error),
 

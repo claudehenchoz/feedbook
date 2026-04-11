@@ -32,10 +32,10 @@ async fn main() -> Result<(), AppError> {
         feed_items.truncate(n);
     }
 
-    // Only fetch articles not already in cache
+    // Only fetch articles not already in cache (unless --force)
     let to_fetch: Vec<_> = feed_items
         .into_iter()
-        .filter(|item| !cached_urls.contains(&item.url))
+        .filter(|item| args.force || !cached_urls.contains(&item.url))
         .collect();
 
     if !to_fetch.is_empty() {

@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use dom_smoothie::Readability;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use crate::error::AppError;
 use crate::feed::FeedItem;
 
 #[derive(Clone)]
@@ -48,33 +47,59 @@ pub async fn scrape_articles(
             let client = client.clone();
             let pb = pb.clone();
             async move {
-                let result: Result<ScrapedArticle, AppError> = async {
-                    let html = client.get(&item.url).send().await?.text().await?;
-                    let url_str = item.url.clone();
+                // HTTP fetch — if this fails it's likely transient, so drop and retry next run.
+                let html = match client.get(&item.url).send().await {
+                    Err(e) => {
+                        eprintln!("HTTP fetch error ({}): {}", item.url, e);
+                        pb.inc(1);
+                        return None;
+                    }
+                    Ok(resp) => match resp.text().await {
+                        Err(e) => {
+                            eprintln!("HTTP read error ({}): {}", item.url, e);
+                            pb.inc(1);
+                            return None;
+                        }
+                        Ok(h) => h,
+                    },
+                };
 
-                    // Article contains StrTendril (!Send), so convert to owned types inside
-                    // the blocking thread before returning across the thread boundary.
-                    let (title, byline, published_time, content) =
-                        tokio::task::spawn_blocking(move || {
-                            Readability::new(html, Some(&url_str), None)
-                                .and_then(|mut r| r.parse())
-                                .map(|a| (a.title, a.byline, a.published_time, a.content.to_string()))
-                        })
-                        .await
-                        .map_err(|e| AppError::Scraper(e.to_string()))? // JoinError
-                        .map_err(|e| AppError::Scraper(e.to_string()))?; // ReadabilityError
+                let url_str = item.url.clone();
 
-                    Ok(ScrapedArticle {
+                // Article contains StrTendril (!Send), so convert to owned types inside
+                // the blocking thread before returning across the thread boundary.
+                let parse_result = tokio::task::spawn_blocking(move || {
+                    Readability::new(html, Some(&url_str), None)
+                        .and_then(|mut r| r.parse())
+                        .map(|a| (a.title, a.byline, a.published_time, a.content.to_string()))
+                })
+                .await
+                .ok()       // JoinError → None
+                .and_then(|r| r.ok()); // ReadabilityError → None
+
+                pb.inc(1);
+
+                // Readability failure: still cache with feed metadata so the URL isn't
+                // re-fetched on every run. The EPUB chapter will have an empty body.
+                Some(match parse_result {
+                    Some((title, byline, published_time, content)) => ScrapedArticle {
                         url: item.url,
                         title: Some(title).filter(|t| !t.is_empty()).or(item.title),
                         author: byline.or(item.author),
                         date: published_time.as_deref().and_then(parse_date).or(item.date),
                         html: Some(content),
-                    })
-                }
-                .await;
-                pb.inc(1);
-                result.ok()
+                    },
+                    None => {
+                        eprintln!("Readability failed ({}), caching with no content", item.url);
+                        ScrapedArticle {
+                            url: item.url,
+                            title: item.title,
+                            author: item.author,
+                            date: item.date,
+                            html: None,
+                        }
+                    }
+                })
             }
         })
         .buffer_unordered(5)
