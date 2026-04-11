@@ -1,3 +1,0 @@
-[env]
-VCPKG_ROOT = "C:/CHDEV/vcpkg"
-VCPKGRS_TRIPLET = "x64-windows-static-md"

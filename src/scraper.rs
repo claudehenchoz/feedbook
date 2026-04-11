@@ -1,9 +1,7 @@
-use std::sync::Arc;
-use article_scraper::ArticleScraper;
 use chrono::{DateTime, Utc};
+use dom_smoothie::Readability;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use url::Url;
 use crate::error::AppError;
 use crate::feed::FeedItem;
 
@@ -16,6 +14,16 @@ pub struct ScrapedArticle {
     pub html: Option<String>,
 }
 
+fn parse_date(s: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc2822(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    None
+}
+
 pub async fn scrape_articles(
     client: &reqwest::Client,
     items: Vec<FeedItem>,
@@ -24,7 +32,6 @@ pub async fn scrape_articles(
         return Vec::new();
     }
 
-    let scraper = Arc::new(ArticleScraper::new(None).await);
     let client = client.clone();
     let total = items.len() as u64;
 
@@ -39,21 +46,30 @@ pub async fn scrape_articles(
     futures::stream::iter(items)
         .map(|item| {
             let client = client.clone();
-            let scraper = Arc::clone(&scraper);
             let pb = pb.clone();
             async move {
                 let result: Result<ScrapedArticle, AppError> = async {
-                    let parsed_url = Url::parse(&item.url)?;
-                    let article = scraper
-                        .parse(&parsed_url, &client)
+                    let html = client.get(&item.url).send().await?.text().await?;
+                    let url_str = item.url.clone();
+
+                    // Article contains StrTendril (!Send), so convert to owned types inside
+                    // the blocking thread before returning across the thread boundary.
+                    let (title, byline, published_time, content) =
+                        tokio::task::spawn_blocking(move || {
+                            Readability::new(html, Some(&url_str), None)
+                                .and_then(|mut r| r.parse())
+                                .map(|a| (a.title, a.byline, a.published_time, a.content.to_string()))
+                        })
                         .await
-                        .map_err(|e| AppError::Scraper(e.to_string()))?;
+                        .map_err(|e| AppError::Scraper(e.to_string()))? // JoinError
+                        .map_err(|e| AppError::Scraper(e.to_string()))?; // ReadabilityError
+
                     Ok(ScrapedArticle {
                         url: item.url,
-                        title: article.title.or(item.title),
-                        author: article.author.or(item.author),
-                        date: article.date.or(item.date),
-                        html: article.html,
+                        title: Some(title).filter(|t| !t.is_empty()).or(item.title),
+                        author: byline.or(item.author),
+                        date: published_time.as_deref().and_then(parse_date).or(item.date),
+                        html: Some(content),
                     })
                 }
                 .await;

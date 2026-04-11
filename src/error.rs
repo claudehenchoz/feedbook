@@ -20,9 +20,6 @@ pub enum AppError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("URL parse error: {0}")]
-    Url(#[from] url::ParseError),
-
     #[error("{0}")]
     Other(String),
 }
