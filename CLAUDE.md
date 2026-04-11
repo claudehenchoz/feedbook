@@ -23,7 +23,7 @@ There are no tests at this time.
 Three native dependencies must be configured via `.cargo/config.toml` (already committed):
 
 1. **libxml2 via vcpkg** — installed as `libxml2:x64-windows-static-md` (statically linked). `VCPKG_ROOT` and `VCPKGRS_TRIPLET` point to `C:/CHDEV/vcpkg`.
-2. **LLVM/Clang for bindgen** — LLVM 22+ at `C:/Program Files/LLVM`. `LIBCLANG_PATH` uses `force = true` to override the ESP Rust toolchain's wrong-architecture `libclang.dll`.
+2. **LLVM/Clang for bindgen** — LLVM 22+ at `C:/Program Files/LLVM`. Set `LIBCLANG_PATH=C:\Program Files\LLVM\bin` as a Windows **system or user environment variable** (not in `.cargo/config.toml`) so it overrides the ESP Rust toolchain's wrong-architecture `libclang.dll`. On Linux, bindgen auto-discovers `libclang.so` from standard paths.
 3. Do **not** install `libxml2:x64-windows` (the dynamic triplet) alongside `x64-windows-static-md` — the `libxml` crate's build script does a `vcpkg list libxml2` and picks the first result; if the 2.10.x dynamic package appears first, it incorrectly sets `cfg(libxml_older_than_2_12)` and causes a type mismatch compile error. Only `x64-windows-static-md` should be present.
 
 If the release build fails with a `*const _xmlError` / `*mut _xmlError` mismatch, delete `target/release/build/libxml-*` and rebuild — the build script may be using a stale cached output from a prior bad state.

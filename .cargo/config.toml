@@ -1,4 +1,3 @@
 [env]
 VCPKG_ROOT = "C:/CHDEV/vcpkg"
 VCPKGRS_TRIPLET = "x64-windows-static-md"
-LIBCLANG_PATH = { value = "C:/Program Files/LLVM/bin", force = true }
