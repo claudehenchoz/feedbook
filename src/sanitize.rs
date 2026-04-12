@@ -14,7 +14,10 @@ pub fn build_sanitizer() -> Arc<Builder<'static>> {
         "figure", "figcaption", "hgroup",
         "mark", "time", "ruby", "rt", "rp", "rb", "rtc", "bdi", "wbr",
         "details", "summary",
-        "picture", "source",
+        // picture: stripped (tag removed, <img> content kept) — EPUB3 readers don't
+        // need responsive image selection, and <source srcset=...> elements inside
+        // reference external URLs that EPUBCHECK flags as href-not-in-manifest.
+        // source: also excluded; it is a void element so stripping it removes it fully.
         "audio", "video", "track",
         "svg",
     ]);
@@ -37,8 +40,7 @@ pub fn build_sanitizer() -> Arc<Builder<'static>> {
     // --- Per-tag attributes ---
     let mut tag_attrs: HashMap<&str, HashSet<&str>> = HashMap::new();
     tag_attrs.insert("a",          ["href", "hreflang", "type"].into_iter().collect());
-    tag_attrs.insert("img",        ["src", "alt", "width", "height", "srcset", "sizes", "longdesc"].into_iter().collect());
-    tag_attrs.insert("source",     ["src", "srcset", "type", "media", "sizes"].into_iter().collect());
+    tag_attrs.insert("img",        ["src", "alt", "width", "height"].into_iter().collect());
     tag_attrs.insert("audio",      ["src", "controls", "preload"].into_iter().collect());
     tag_attrs.insert("video",      ["src", "controls", "preload", "poster", "width", "height"].into_iter().collect());
     tag_attrs.insert("track",      ["src", "kind", "srclang", "label", "default"].into_iter().collect());
