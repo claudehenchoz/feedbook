@@ -81,7 +81,11 @@ fn build_chapter_xhtml(
                         epub_images.get(&sha1).map(|img| (raw_src, img.filename.clone()))
                     })
                     .collect();
-                images::rewrite_img_srcs(html, &src_to_filename)
+                let rewritten = images::rewrite_img_srcs(html, &src_to_filename);
+                // Drop any <img> tags whose src is still an external URL — these
+                // are images that failed to download (including dom_smoothie
+                // lazy-image URL mangling). Leaving them causes EPUBCHECK errors.
+                images::strip_external_imgs(&rewritten)
             }
         }
     };

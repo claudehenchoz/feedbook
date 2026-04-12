@@ -91,6 +91,34 @@ pub fn rewrite_img_srcs(html: &str, src_to_filename: &HashMap<String, String>) -
     .into_owned()
 }
 
+/// Removes `<img>` tags whose `src` is still an external http/https URL.
+/// Called after `rewrite_img_srcs` to drop any images that were not
+/// successfully downloaded — including those whose URLs were mangled
+/// by dom_smoothie's lazy-image unwrapping — preventing EPUBCHECK
+/// `href-not-in-manifest` errors.
+pub fn strip_external_imgs(html: &str) -> String {
+    static IMG_TAG_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static EXT_SRC_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+
+    let tag_re = IMG_TAG_RE.get_or_init(|| {
+        // Matches complete self-closing <img ... /> tags (XHTML output from fixup_xhtml)
+        Regex::new(r#"(?i)<img\b[^>]*/>"#).unwrap()
+    });
+    let src_re = EXT_SRC_RE.get_or_init(|| {
+        Regex::new(r#"(?i)\bsrc="https?://"#).unwrap()
+    });
+
+    tag_re.replace_all(html, |caps: &regex::Captures| {
+        let tag = &caps[0];
+        if src_re.is_match(tag) {
+            String::new() // drop tag — external URL that wasn't embedded
+        } else {
+            tag.to_string()
+        }
+    })
+    .into_owned()
+}
+
 /// Downloads and processes images that are not already in the cache.
 /// Returns only images that need to be inserted into the DB.
 pub async fn download_and_process(
