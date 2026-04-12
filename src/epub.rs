@@ -1,6 +1,5 @@
-use std::fs::File;
 use std::path::PathBuf;
-use epub_builder::{EpubBuilder, EpubContent, ZipLibrary};
+use rbook::epub::{Epub, EpubChapter};
 use crate::error::AppError;
 use crate::scraper::ScrapedArticle;
 
@@ -70,7 +69,7 @@ fn build_chapter_xhtml(article: &ScrapedArticle) -> String {
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <title>{title}</title>
-  <link rel="stylesheet" type="text/css" href="../stylesheet.css"/>
+  <link rel="stylesheet" type="text/css" href="stylesheet.css"/>
 </head>
 <body>
   <div class="article-header">
@@ -96,31 +95,23 @@ pub fn build_epub(
     articles: &[ScrapedArticle],
     output_path: &PathBuf,
 ) -> Result<(), AppError> {
-    let mut builder = EpubBuilder::new(ZipLibrary::new().map_err(|e| AppError::Epub(e.to_string()))?)
-        .map_err(|e| AppError::Epub(e.to_string()))?;
+    let chapters: Vec<EpubChapter> = articles
+        .iter()
+        .map(|article| {
+            let xhtml = build_chapter_xhtml(article);
+            let title = article.title.as_deref().unwrap_or("Untitled");
+            EpubChapter::new(title).xhtml(xhtml)
+        })
+        .collect();
 
-    builder
-        .metadata("title", feed_title)
-        .map_err(|e| AppError::Epub(e.to_string()))?
-        .metadata("lang", "en")
-        .map_err(|e| AppError::Epub(e.to_string()))?
-        .stylesheet(STYLESHEET.as_bytes())
-        .map_err(|e| AppError::Epub(e.to_string()))?;
-
-    for (i, article) in articles.iter().enumerate() {
-        let xhtml = build_chapter_xhtml(article);
-        let title = article.title.as_deref().unwrap_or("Untitled");
-        builder
-            .add_content(
-                EpubContent::new(format!("article_{i}.xhtml"), xhtml.as_bytes())
-                    .title(title),
-            )
-            .map_err(|e| AppError::Epub(e.to_string()))?;
-    }
-
-    let file = File::create(output_path)?;
-    builder
-        .generate(file)
+    Epub::builder()
+        .identifier(feed_title)
+        .title(feed_title)
+        .language("en")
+        .resource(("stylesheet.css", STYLESHEET))
+        .chapter(chapters)
+        .write()
+        .save(output_path)
         .map_err(|e| AppError::Epub(e.to_string()))?;
 
     Ok(())

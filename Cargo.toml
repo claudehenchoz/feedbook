@@ -10,7 +10,7 @@ reqwest = { version = "0.13", features = ["rustls"] }
 feed-rs = "2.3"
 dom_smoothie = "0.17"
 rusqlite = { version = "0.39", features = ["bundled"] }
-epub-builder = "0.8"
+rbook = "0.7.5"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
