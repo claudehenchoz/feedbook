@@ -10,6 +10,7 @@ reqwest = { version = "0.13", features = ["rustls"] }
 feed-rs = "2.3"
 dom_smoothie = "0.17"
 ammonia = "4"
+regex = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rbook = "0.7.5"
 dirs = "6"

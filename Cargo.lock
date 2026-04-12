@@ -547,6 +547,7 @@ dependencies = [
  "futures",
  "indicatif",
  "rbook",
+ "regex",
  "reqwest",
  "rusqlite",
  "thiserror 2.0.18",
