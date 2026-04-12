@@ -14,4 +14,12 @@ pub struct Args {
     /// Re-fetch all articles from the web, ignoring and overwriting the cache
     #[arg(long)]
     pub force: bool,
+
+    /// Disable image downloading and embedding
+    #[arg(long)]
+    pub no_images: bool,
+
+    /// Maximum image width in pixels
+    #[arg(long, default_value_t = 460)]
+    pub max_image_width: u32,
 }

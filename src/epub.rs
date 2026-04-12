@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use rbook::epub::{Epub, EpubChapter};
 use crate::error::AppError;
+use crate::images::{self, ProcessedImage};
 use crate::scraper::ScrapedArticle;
 
 const STYLESHEET: &str = r#"body {
@@ -54,14 +56,35 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn build_chapter_xhtml(article: &ScrapedArticle) -> String {
+fn build_chapter_xhtml(
+    article: &ScrapedArticle,
+    epub_images: &HashMap<String, ProcessedImage>,
+) -> String {
     let title = article.title.as_deref().unwrap_or("Untitled");
     let author = article.author.as_deref().unwrap_or("Unknown");
     let date = article
         .date
         .map(|d| d.format("%Y-%m-%d").to_string())
         .unwrap_or_default();
-    let html_body = article.html.as_deref().unwrap_or("");
+
+    let html_body = match article.html.as_deref() {
+        None | Some("") => String::new(),
+        Some(html) => {
+            if epub_images.is_empty() {
+                html.to_string()
+            } else {
+                // Build src → local filename map for images present in this article
+                let src_to_filename: HashMap<String, String> = images::extract_image_urls(html, &article.url)
+                    .into_iter()
+                    .filter_map(|(raw_src, abs_url)| {
+                        let sha1 = images::url_sha1(&abs_url);
+                        epub_images.get(&sha1).map(|img| (raw_src, img.filename.clone()))
+                    })
+                    .collect();
+                images::rewrite_img_srcs(html, &src_to_filename)
+            }
+        }
+    };
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -91,24 +114,31 @@ fn build_chapter_xhtml(article: &ScrapedArticle) -> String {
 }
 
 pub fn build_epub(
-    feed_title: &str,
-    articles: &[ScrapedArticle],
+    feed_title:  &str,
+    articles:    &[ScrapedArticle],
+    epub_images: &HashMap<String, ProcessedImage>,
     output_path: &PathBuf,
 ) -> Result<(), AppError> {
     let chapters: Vec<EpubChapter> = articles
         .iter()
         .map(|article| {
-            let xhtml = build_chapter_xhtml(article);
+            let xhtml = build_chapter_xhtml(article, epub_images);
             let title = article.title.as_deref().unwrap_or("Untitled");
             EpubChapter::new(title).xhtml(xhtml)
         })
         .collect();
 
-    Epub::builder()
+    let mut builder = Epub::builder()
         .identifier(feed_title)
         .title(feed_title)
         .language("en")
-        .resource(("stylesheet.css", STYLESHEET))
+        .resource(("stylesheet.css", STYLESHEET));
+
+    for img in epub_images.values() {
+        builder = builder.resource((img.filename.as_str(), img.data.as_slice()));
+    }
+
+    builder
         .chapter(chapters)
         .write()
         .save(output_path)

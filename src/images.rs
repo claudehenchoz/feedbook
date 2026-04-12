@@ -1,0 +1,241 @@
+use std::collections::HashMap;
+use std::io::Cursor;
+use futures::StreamExt;
+use image::{DynamicImage, ImageFormat, RgbImage, RgbaImage};
+use regex::Regex;
+use sha1::{Digest, Sha1};
+use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
+
+pub struct ProcessedImage {
+    pub url_sha1:     String,
+    pub original_url: String,
+    pub filename:     String, // e.g. "images/deadbeef....jpeg"
+    pub data:         Vec<u8>,
+}
+
+pub fn url_sha1(url: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(url.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Extracts `(raw_src_attr, absolute_url)` pairs from sanitized XHTML.
+/// Ammonia always double-quotes attributes, so we can rely on `src="..."`.
+pub fn extract_image_urls(html: &str, article_url: &str) -> Vec<(String, String)> {
+    static IMG_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = IMG_RE.get_or_init(|| {
+        Regex::new(r#"(?i)<img\b[^>]*?\bsrc="([^"]*)""#).unwrap()
+    });
+
+    let base = match url::Url::parse(article_url) {
+        Ok(u) => u,
+        Err(_) => return vec![],
+    };
+
+    re.captures_iter(html)
+        .filter_map(|cap| {
+            let raw = cap[1].to_string();
+            if raw.is_empty() {
+                return None;
+            }
+            // Skip inline data URIs — nothing to download
+            if raw.starts_with("data:") {
+                return None;
+            }
+            // Resolve to absolute URL
+            let abs = if let Ok(parsed) = url::Url::parse(&raw) {
+                // Already absolute — only allow http/https
+                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    return None;
+                }
+                raw.clone()
+            } else {
+                // Try to resolve as relative
+                match base.join(&raw) {
+                    Ok(resolved) => {
+                        if resolved.scheme() != "http" && resolved.scheme() != "https" {
+                            return None;
+                        }
+                        resolved.to_string()
+                    }
+                    Err(_) => return None,
+                }
+            };
+            Some((raw, abs))
+        })
+        .collect()
+}
+
+/// Rewrites `<img src="raw_src">` references using the provided map.
+/// Keys are the raw `src` attribute values captured from HTML.
+/// Values are the local EPUB-relative paths (e.g. `"images/sha1hex.jpeg"`).
+pub fn rewrite_img_srcs(html: &str, src_to_filename: &HashMap<String, String>) -> String {
+    if src_to_filename.is_empty() {
+        return html.to_string();
+    }
+
+    static IMG_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = IMG_RE.get_or_init(|| {
+        Regex::new(r#"(?i)(<img\b[^>]*?\bsrc=")([^"]*)"#).unwrap()
+    });
+
+    re.replace_all(html, |caps: &regex::Captures| {
+        let prefix = &caps[1]; // `<img ... src="`
+        let raw_src = &caps[2];
+        if let Some(local) = src_to_filename.get(raw_src) {
+            format!("{}{}", prefix, local)
+        } else {
+            caps[0].to_string()
+        }
+    })
+    .into_owned()
+}
+
+/// Downloads and processes images that are not already in the cache.
+/// Returns only images that need to be inserted into the DB.
+pub async fn download_and_process(
+    client:    &reqwest::Client,
+    urls:      Vec<(String, String)>, // (raw_src, absolute_url)
+    max_width: u32,
+) -> Vec<ProcessedImage> {
+    if urls.is_empty() {
+        return vec![];
+    }
+
+    futures::stream::iter(urls)
+        .map(|(raw_src, abs_url)| {
+            let client = client.clone();
+            async move {
+                let bytes = match client.get(&abs_url).send().await {
+                    Err(e) => {
+                        eprintln!("Image fetch error ({}): {}", abs_url, e);
+                        return None;
+                    }
+                    Ok(resp) => match resp.bytes().await {
+                        Err(e) => {
+                            eprintln!("Image read error ({}): {}", abs_url, e);
+                            return None;
+                        }
+                        Ok(b) => b,
+                    },
+                };
+
+                let sha1 = url_sha1(&abs_url);
+                let abs_url_clone = abs_url.clone();
+
+                // CPU-intensive work: decode, resize, encode
+                let result = tokio::task::spawn_blocking(move || {
+                    process_image_bytes(bytes.to_vec(), &abs_url_clone, &sha1, max_width)
+                })
+                .await
+                .ok()
+                .and_then(|r| r);
+
+                if result.is_none() {
+                    // raw_src is unused if we return None, but suppress the warning
+                    let _ = raw_src;
+                }
+                result
+            }
+        })
+        .buffer_unordered(4)
+        .filter_map(|r| async move { r })
+        .collect::<Vec<_>>()
+        .await
+}
+
+fn is_svg(bytes: &[u8], url: &str) -> bool {
+    let url_lower = url.to_lowercase();
+    if url_lower.ends_with(".svg") || url_lower.contains(".svg?") {
+        return true;
+    }
+    // Check first 256 bytes for SVG content markers
+    let prefix = &bytes[..bytes.len().min(256)];
+    let prefix_str = std::str::from_utf8(prefix).unwrap_or("");
+    prefix_str.contains("<svg") || (prefix_str.contains("<?xml") && prefix_str.contains("<svg"))
+}
+
+fn process_image_bytes(
+    bytes: Vec<u8>,
+    abs_url: &str,
+    sha1: &str,
+    max_width: u32,
+) -> Option<ProcessedImage> {
+    // Handle SVGs: store as-is without decode/resize
+    if is_svg(&bytes, abs_url) {
+        let filename = format!("images/{}.svg", sha1);
+        return Some(ProcessedImage {
+            url_sha1:     sha1.to_string(),
+            original_url: abs_url.to_string(),
+            filename,
+            data: bytes,
+        });
+    }
+
+    // Decode raster image
+    let img = match image::load_from_memory(&bytes) {
+        Ok(img) => img,
+        Err(e) => {
+            eprintln!("Image decode error ({}): {}", abs_url, e);
+            return None;
+        }
+    };
+
+    // Determine output format based on alpha channel presence
+    let has_alpha = img.color().has_alpha();
+
+    // Convert to canonical 8-bit format for resize
+    let img: DynamicImage = if has_alpha {
+        img.into_rgba8().into()
+    } else {
+        img.into_rgb8().into()
+    };
+
+    // Resize if wider than max_width
+    let img = if img.width() > max_width {
+        let new_w = max_width;
+        let new_h = ((img.height() as f64 * max_width as f64 / img.width() as f64) as u32).max(1);
+        resize_image(img, new_w, new_h, has_alpha)?
+    } else {
+        img
+    };
+
+    // Encode
+    let (ext, fmt) = if has_alpha {
+        ("png", ImageFormat::Png)
+    } else {
+        ("jpeg", ImageFormat::Jpeg)
+    };
+    let filename = format!("images/{}.{}", sha1, ext);
+
+    let mut buf = Vec::new();
+    if let Err(e) = img.write_to(&mut Cursor::new(&mut buf), fmt) {
+        eprintln!("Image encode error ({}): {}", abs_url, e);
+        return None;
+    }
+
+    Some(ProcessedImage {
+        url_sha1:     sha1.to_string(),
+        original_url: abs_url.to_string(),
+        filename,
+        data: buf,
+    })
+}
+
+fn resize_image(img: DynamicImage, new_w: u32, new_h: u32, has_alpha: bool) -> Option<DynamicImage> {
+    let opts = ResizeOptions::new()
+        .resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
+
+    let mut dst: DynamicImage = if has_alpha {
+        DynamicImage::ImageRgba8(RgbaImage::new(new_w, new_h))
+    } else {
+        DynamicImage::ImageRgb8(RgbImage::new(new_w, new_h))
+    };
+
+    if let Err(e) = Resizer::new().resize(&img, &mut dst, &opts) {
+        eprintln!("Image resize error: {}", e);
+        return None;
+    }
+
+    Some(dst)
+}

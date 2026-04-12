@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use rusqlite::{Connection, params};
 use crate::error::AppError;
+use crate::images::ProcessedImage;
 use crate::scraper::ScrapedArticle;
 
 pub fn db_path() -> Result<PathBuf, AppError> {
@@ -28,7 +29,15 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
             fetched_at  INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_feed_url   ON articles(feed_url);
-        CREATE INDEX IF NOT EXISTS idx_fetched_at ON articles(fetched_at);",
+        CREATE INDEX IF NOT EXISTS idx_fetched_at ON articles(fetched_at);
+        CREATE TABLE IF NOT EXISTS images (
+            url_sha1   TEXT    PRIMARY KEY,
+            orig_url   TEXT    NOT NULL,
+            filename   TEXT    NOT NULL,
+            data       BLOB    NOT NULL,
+            fetched_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_images_fetched_at ON images(fetched_at);",
     )?;
     Ok(conn)
 }
@@ -120,4 +129,55 @@ pub fn load_articles(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(articles)
+}
+
+pub fn prune_images(conn: &Connection) -> Result<(), AppError> {
+    conn.execute(
+        "DELETE FROM images WHERE fetched_at < (strftime('%s', 'now') - 7776000)",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn get_cached_image_sha1s(conn: &Connection) -> Result<HashSet<String>, AppError> {
+    let mut stmt = conn.prepare("SELECT url_sha1 FROM images")?;
+    let sha1s = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<HashSet<String>, _>>()?;
+    Ok(sha1s)
+}
+
+pub fn insert_image(conn: &Connection, img: &ProcessedImage) -> Result<(), AppError> {
+    let fetched_at = Utc::now().timestamp();
+    conn.execute(
+        "INSERT OR IGNORE INTO images (url_sha1, orig_url, filename, data, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![img.url_sha1, img.original_url, img.filename, img.data, fetched_at],
+    )?;
+    Ok(())
+}
+
+pub fn load_images(conn: &Connection, sha1s: &[String]) -> Result<Vec<ProcessedImage>, AppError> {
+    if sha1s.is_empty() {
+        return Ok(vec![]);
+    }
+    let placeholders = sha1s.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT url_sha1, orig_url, filename, data FROM images WHERE url_sha1 IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> =
+        sha1s.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let images = stmt
+        .query_map(params.as_slice(), |row| {
+            Ok(ProcessedImage {
+                url_sha1:     row.get(0)?,
+                original_url: row.get(1)?,
+                filename:     row.get(2)?,
+                data:         row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(images)
 }
