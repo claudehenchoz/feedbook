@@ -81,14 +81,22 @@ pub fn sanitize_html(builder: &Builder<'static>, html: &str) -> String {
 ///   2. Replace named HTML entities with numeric character references
 ///      (&nbsp; → &#160; etc.) — only the 5 predefined XML entities
 ///      (&amp; &lt; &gt; &quot; &apos;) are valid in XML without a DTD.
+///   3. Replace obsolete <tt> with <code> (not allowed in EPUB3).
+///   4. Strip fragment-only hrefs from <a> tags (href="#...") to prevent
+///      EPUBCHECK RSC-012 errors when the target id doesn't exist in the
+///      extracted chapter (e.g. GitHub "Permalink" anchors whose id is
+///      prefixed with "user-content-" while the href omits the prefix).
 fn fixup_xhtml(html: &str) -> String {
-    static VOID_RE: OnceLock<Regex> = OnceLock::new();
-    static ENTITY_RE: OnceLock<Regex> = OnceLock::new();
+    static VOID_RE:      OnceLock<Regex> = OnceLock::new();
+    static ENTITY_RE:    OnceLock<Regex> = OnceLock::new();
+    static TT_OPEN_RE:   OnceLock<Regex> = OnceLock::new();
+    static A_TAG_RE:     OnceLock<Regex> = OnceLock::new();
+    static FRAG_HREF_RE: OnceLock<Regex> = OnceLock::new();
 
-    // Matches void element opening tags. The attribute group requires leading
-    // whitespace, so <br/> and <br/> are never captured (/ is not \s), while
-    // <br>, <br >, and <img src="x"> all match. Already-closed tags like
-    // <br /> are caught by the ends_with("/>") guard in the closure.
+    // Step 1: self-close void elements.
+    // The attribute group requires leading whitespace, so <br/> is never
+    // captured (/ is not \s). Already-closed <br /> is caught by the
+    // ends_with("/>") guard.
     let void_re = VOID_RE.get_or_init(|| {
         Regex::new(
             r"(?i)<(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)(\s[^>]*)?>",
@@ -106,21 +114,46 @@ fn fixup_xhtml(html: &str) -> String {
         format!("<{}{} />", tag, attrs.trim_end())
     });
 
-    // Replace named HTML entities with their numeric equivalents.
-    // After html5ever (ammonia) serialization the primary offender is &nbsp;
-    // for U+00A0; the full HTML4 table below is a safety net.
+    // Step 2: named HTML entities → numeric character references.
     let entity_re = ENTITY_RE.get_or_init(|| {
         Regex::new(r"&([A-Za-z][A-Za-z0-9]*);").unwrap()
     });
 
-    entity_re
+    let html = entity_re
         .replace_all(&html, |caps: &regex::Captures| {
             match named_to_numeric(&caps[1]) {
                 Some(numeric) => numeric.to_owned(),
                 None => caps[0].to_owned(), // XML predefined or unknown — leave as-is
             }
-        })
-        .into_owned()
+        });
+
+    // Step 3: replace obsolete <tt> with <code>.
+    // html5ever normalises tag names to lowercase, so </tt> is sufficient.
+    let tt_open = TT_OPEN_RE.get_or_init(|| {
+        Regex::new(r"(?i)<tt(\b[^>]*)?>").unwrap()
+    });
+    let html = tt_open.replace_all(&html, |caps: &regex::Captures| {
+        let attrs = caps.get(1).map_or("", |m| m.as_str());
+        format!("<code{}>", attrs)
+    });
+    let html = if html.contains("</tt>") {
+        std::borrow::Cow::Owned(html.replace("</tt>", "</code>"))
+    } else {
+        html
+    };
+
+    // Step 4: strip fragment-only hrefs from <a> tags.
+    // After ammonia+html5ever serialisation, href only appears on <a> tags
+    // and attribute values are double-quoted. A leading \s+ is always present
+    // (html5ever puts a space before every attribute).
+    let a_re = A_TAG_RE.get_or_init(|| Regex::new(r"(?i)<a\b[^>]*>").unwrap());
+    let frag_re = FRAG_HREF_RE.get_or_init(|| {
+        Regex::new(r##"\s+href="#[^"]*""##).unwrap()
+    });
+    a_re.replace_all(&html, |caps: &regex::Captures| {
+        frag_re.replace(&caps[0], "").into_owned()
+    })
+    .into_owned()
 }
 
 /// Maps HTML4 named character references to their numeric equivalents.
