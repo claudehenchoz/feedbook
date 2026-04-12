@@ -3,6 +3,7 @@ use dom_smoothie::Readability;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::feed::FeedItem;
+use crate::sanitize::{build_sanitizer, sanitize_html};
 
 #[derive(Clone)]
 pub struct ScrapedArticle {
@@ -31,6 +32,7 @@ pub async fn scrape_articles(
         return Vec::new();
     }
 
+    let sanitizer = build_sanitizer();
     let client = client.clone();
     let total = items.len() as u64;
 
@@ -46,6 +48,7 @@ pub async fn scrape_articles(
         .map(|item| {
             let client = client.clone();
             let pb = pb.clone();
+            let sanitizer = sanitizer.clone();
             async move {
                 // HTTP fetch — if this fails it's likely transient, so drop and retry next run.
                 let html = match client.get(&item.url).send().await {
@@ -87,7 +90,7 @@ pub async fn scrape_articles(
                         title: Some(title).filter(|t| !t.is_empty()).or(item.title),
                         author: byline.or(item.author),
                         date: published_time.as_deref().and_then(parse_date).or(item.date),
-                        html: Some(content),
+                        html: Some(sanitize_html(&sanitizer, &content)),
                     },
                     None => {
                         eprintln!("Readability failed ({}), caching with no content", item.url);

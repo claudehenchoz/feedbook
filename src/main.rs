@@ -3,6 +3,7 @@ mod cli;
 mod epub;
 mod error;
 mod feed;
+mod sanitize;
 mod scraper;
 
 use std::collections::HashSet;
