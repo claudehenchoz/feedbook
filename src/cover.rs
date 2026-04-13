@@ -166,7 +166,7 @@ fn draw_favicon_pattern(
     cell_w: u32,
     cell_h: u32,
     pattern_start_y: u32,
-    margin_x: u32, // New parameter!
+    margin_x: u32,
 ) {
     let angle = ROTATION_DEGREES.to_radians();
     let (sin_a, cos_a) = angle.sin_cos();
@@ -178,35 +178,58 @@ fn draw_favicon_pattern(
     let in_cx = fav_w / 2.0;
     let in_cy = fav_h / 2.0;
 
+    // 2x2 Supersampling offsets within a single pixel
+    let ss_offsets = [(-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)];
+    let opacity = 0.5;
+
     for row in 0..ROWS {
         for col in 0..COLS {
-            // Apply the margin_x here to shift the whole grid inward
             let cell_x = margin_x + col * cell_w;
             let cell_y = pattern_start_y + row * cell_h;
 
             for py in 0..cell_h {
                 for px in 0..cell_w {
-                    let dx = px as f32 - out_cx;
-                    let dy = py as f32 - out_cy;
+                    let mut r_acc = 0.0;
+                    let mut g_acc = 0.0;
+                    let mut b_acc = 0.0;
+                    let mut a_acc = 0.0;
 
-                    let sx = dx * cos_a + dy * sin_a + in_cx;
-                    let sy = -dx * sin_a + dy * cos_a + in_cy;
+                    // Take 4 samples per pixel
+                    for (ox, oy) in ss_offsets {
+                        let dx = (px as f32 + ox) - out_cx;
+                        let dy = (py as f32 + oy) - out_cy;
 
-                    if sx >= 0.0 && sy >= 0.0 && sx < fav_w - 1.0 && sy < fav_h - 1.0 {
-                        let src_pixel = get_pixel_bilinear(fav, sx, sy);
+                        let sx = dx * cos_a + dy * sin_a + in_cx;
+                        let sy = -dx * sin_a + dy * cos_a + in_cy;
+
+                        // Check bounds for this specific sample
+                        if sx >= 0.0 && sy >= 0.0 && sx < fav_w - 1.0 && sy < fav_h - 1.0 {
+                            let p = get_pixel_bilinear(fav, sx, sy);
+                            let sample_a = (p[3] as f32 / 255.0) * opacity;
+                            
+                            // Accumulate pre-multiplied colors
+                            r_acc += p[0] as f32 * sample_a;
+                            g_acc += p[1] as f32 * sample_a;
+                            b_acc += p[2] as f32 * sample_a;
+                            a_acc += sample_a;
+                        }
+                    }
+
+                    // Average the 4 samples
+                    let final_a = a_acc / 4.0;
+                    if final_a > 0.0 {
                         let canvas_x = cell_x + px;
                         let canvas_y = cell_y + py;
 
                         if canvas_x < W && canvas_y < H {
                             let bg = canvas.get_pixel(canvas_x, canvas_y);
-                            let src_a = src_pixel[3] as f32 / 255.0 * 0.5;
                             
-                            canvas.put_pixel(canvas_x, canvas_y, Rgba([
-                                blend(src_pixel[0], bg[0], src_a),
-                                blend(src_pixel[1], bg[1], src_a),
-                                blend(src_pixel[2], bg[2], src_a),
-                                255,
-                            ]));
+                            // Blend accumulated foreground over background
+                            let r = (r_acc / 4.0 + bg[0] as f32 * (1.0 - final_a)) as u8;
+                            let g = (g_acc / 4.0 + bg[1] as f32 * (1.0 - final_a)) as u8;
+                            let b = (b_acc / 4.0 + bg[2] as f32 * (1.0 - final_a)) as u8;
+
+                            canvas.put_pixel(canvas_x, canvas_y, Rgba([r, g, b, 255]));
                         }
                     }
                 }
@@ -215,15 +238,18 @@ fn draw_favicon_pattern(
     }
 }
 
-/// Smoothly samples pixels to prevent the "deformed/rounded" look
+/// Improved Bilinear sampler with safety checks
 fn get_pixel_bilinear(img: &RgbaImage, x: f32, y: f32) -> Rgba<u8> {
-    let x1 = x.floor() as u32;
-    let y1 = y.floor() as u32;
-    let x2 = x1 + 1;
-    let y2 = y1 + 1;
+    let width = img.width();
+    let height = img.height();
 
-    let fx = x - x1 as f32;
-    let fy = y - y1 as f32;
+    let x1 = (x.floor() as u32).min(width - 1);
+    let y1 = (y.floor() as u32).min(height - 1);
+    let x2 = (x1 + 1).min(width - 1);
+    let y2 = (y1 + 1).min(height - 1);
+
+    let fx = x - x.floor();
+    let fy = y - y.floor();
 
     let p11 = img.get_pixel(x1, y1);
     let p21 = img.get_pixel(x2, y1);
@@ -234,7 +260,7 @@ fn get_pixel_bilinear(img: &RgbaImage, x: f32, y: f32) -> Rgba<u8> {
     for i in 0..4 {
         let top = p11[i] as f32 * (1.0 - fx) + p21[i] as f32 * fx;
         let bottom = p12[i] as f32 * (1.0 - fx) + p22[i] as f32 * fx;
-        res[i] = (top * (1.0 - fy) + bottom * fy) as u8;
+        res[i] = (top * (1.0 - fy) + bottom * fy).round() as u8;
     }
     Rgba(res)
 }
