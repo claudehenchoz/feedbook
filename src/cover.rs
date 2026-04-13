@@ -10,7 +10,7 @@ static FONT_BYTES: &[u8] = include_bytes!("../fonts/texgyreheros-bold.otf");
 const W: u32 = 1262;
 const H: u32 = 1680;
 const COLS: u32 = 9;
-const ROWS: u32 = 10;
+const ROWS: u32 = 11;
 const ROTATION_DEGREES: f32 = 5.0;
 
 /// Extracts the second-level domain from a URL as a short display title.
@@ -127,20 +127,26 @@ pub fn generate_cover(
     }
 
     // --- 2. Calculate Tiled Grid with Margins ---
-    let pattern_start_y = (title_baseline + 60.0) as u32; // More gap after title
     
-    // Available width/height after margins
+    // Available width after margins
     let available_w = W as f32 - (margin_x * 2.0);
-    let available_h = H as f32 - pattern_start_y as f32 - margin_bottom;
 
-    let cell_w = (available_w / COLS as f32) as u32;
-    let cell_h = (available_h / ROWS as f32) as u32;
+    // 1. Force square cells based strictly on the available width
+    let cell_size = (available_w / COLS as f32) as u32;
 
-    if cell_w > 0 && cell_h > 0 {
+    // 2. Calculate total height of the new perfectly square-celled grid
+    let grid_total_h = (cell_size * ROWS) as f32;
+
+    // 3. Shift the pattern down to anchor it to the bottom margin.
+    // We use .max() to ensure it doesn't accidentally overlap the title if dimensions change.
+    let min_start_y = title_baseline + 60.0; 
+    let pattern_start_y = (H as f32 - margin_bottom - grid_total_h).max(min_start_y) as u32;
+
+    if cell_size > 0 {
         if let Some(fav_bytes) = favicon_data {
-            if let Some(fav_rgba) = decode_and_resize_favicon(fav_bytes, cell_w, cell_h) {
-                // Pass margin_x to the draw function
-                draw_favicon_pattern(&mut img, &fav_rgba, cell_w, cell_h, pattern_start_y, margin_x as u32);
+            // 4. Pass cell_size for both width and height to keep it completely square
+            if let Some(fav_rgba) = decode_and_resize_favicon(fav_bytes, cell_size, cell_size) {
+                draw_favicon_pattern(&mut img, &fav_rgba, cell_size, cell_size, pattern_start_y, margin_x as u32);
             }
         }
     }
