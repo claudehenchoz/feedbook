@@ -27,9 +27,7 @@ pub async fn fetch_feed(
         .map(|t| t.content)
         .unwrap_or_else(|| "Feed".to_string());
 
-    let feed_date = feed.published.or(feed.updated);
-
-    let items = feed
+    let items: Vec<FeedItem> = feed
         .entries
         .into_iter()
         .filter_map(|entry| {
@@ -42,6 +40,10 @@ pub async fn fetch_feed(
             })
         })
         .collect();
+
+    // Prefer feed-level date; fall back to the most recent article date.
+    let feed_date = feed.published.or(feed.updated)
+        .or_else(|| items.iter().filter_map(|i| i.date).max());
 
     Ok(FeedData { title: feed_title, date: feed_date, items })
 }
