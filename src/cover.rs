@@ -11,6 +11,7 @@ const W: u32 = 1262;
 const H: u32 = 1680;
 const COLS: u32 = 9;
 const ROWS: u32 = 10;
+const ROTATION_DEGREES: f32 = 5.0;
 
 /// Extracts the second-level domain from a URL as a short display title.
 /// "https://www.inoreader.com/..." → "inoreader"
@@ -79,14 +80,16 @@ pub fn generate_cover(
     date: Option<DateTime<Utc>>,
     favicon_data: Option<&[u8]>,
 ) -> Result<Vec<u8>, AppError> {
-    // White canvas
     let mut img = RgbaImage::from_pixel(W, H, Rgba([255, 255, 255, 255]));
-
     let font = FontRef::try_from_slice(FONT_BYTES)
         .map_err(|e| AppError::Other(format!("Font load error: {e}")))?;
 
-    // --- Title (top-left, adaptive font size) ---
-    let target_width = W as f32 * 0.85;
+    // --- 1. Define Margins ---
+    let margin_x = 80.0; // This creates the "blank space" on the sides
+    let margin_bottom = 80.0; // This creates the "blank space" at the bottom
+
+    // --- Title (top-left, aligned to margin) ---
+    let target_width = W as f32 - (margin_x * 2.0); // Allow room for margins
     let mut font_size: f32 = 140.0;
     while font_size > 40.0 {
         if measure_text_width(title, PxScale::from(font_size), &font) <= target_width {
@@ -95,59 +98,64 @@ pub fn generate_cover(
         font_size -= 2.0;
     }
     let title_scale = PxScale::from(font_size);
-    let ascent = font.as_scaled(title_scale).ascent();
-    let descent = font.as_scaled(title_scale).descent(); // negative
-    let title_baseline = 40.0 + ascent;
-    draw_text(&mut img, title, 20.0, title_baseline, title_scale, Rgba([0, 0, 0, 255]), &font);
+    let title_baseline = 60.0 + font.as_scaled(title_scale).ascent();
+    // Use margin_x here:
+    draw_text(&mut img, title, margin_x, title_baseline, title_scale, Rgba([0, 0, 0, 255]), &font);
 
-    // --- Date block (top-right, 3 lines, right-aligned) ---
+    // --- Date block (top-right, aligned to margin) ---
     if let Some(date) = date {
         let date_scale = PxScale::from(20.0);
         let date_ascent = font.as_scaled(date_scale).ascent();
-        let line_spacing: f32 = 22.0;
-        let right_margin: f32 = 20.0;
-        let date_top: f32 = 25.0;
-
+        
         let weekday = date.format("%A").to_string().to_lowercase();
-        let day = date.day();
-        let month = date.format("%B").to_string().to_lowercase();
-        let year = date.year();
-        let day_month_year = format!("{day} {month} {year}");
+        let day_month_year = format!("{} {} {}", date.day(), date.format("%B").to_string().to_lowercase(), date.year());
         let time_str = format!("{:02}:{:02}", date.hour(), date.minute());
 
         for (i, line) in [weekday.as_str(), day_month_year.as_str(), time_str.as_str()].iter().enumerate() {
             let line_w = measure_text_width(line, date_scale, &font);
-            let x = W as f32 - right_margin - line_w;
-            let y = date_top + date_ascent + i as f32 * line_spacing;
+            // Subtract margin_x from the right edge:
+            let x = W as f32 - margin_x - line_w;
+            let y = 30.0 + date_ascent + i as f32 * 22.0;
             draw_text(&mut img, line, x, y, date_scale, Rgba([0, 0, 0, 255]), &font);
         }
     }
 
-    // --- Favicon pattern (9×10 tiled grid, rotated 10° CCW, 50% opacity) ---
-    let cell_w = W / COLS;
-    let pattern_start_y = (title_baseline - descent + 20.0) as u32;
-    let cell_h = (H.saturating_sub(pattern_start_y)) / ROWS;
+    // --- 2. Calculate Tiled Grid with Margins ---
+    let pattern_start_y = (title_baseline + 60.0) as u32; // More gap after title
+    
+    // Available width/height after margins
+    let available_w = W as f32 - (margin_x * 2.0);
+    let available_h = H as f32 - pattern_start_y as f32 - margin_bottom;
+
+    let cell_w = (available_w / COLS as f32) as u32;
+    let cell_h = (available_h / ROWS as f32) as u32;
 
     if cell_w > 0 && cell_h > 0 {
         if let Some(fav_bytes) = favicon_data {
             if let Some(fav_rgba) = decode_and_resize_favicon(fav_bytes, cell_w, cell_h) {
-                draw_favicon_pattern(&mut img, &fav_rgba, cell_w, cell_h, pattern_start_y);
+                // Pass margin_x to the draw function
+                draw_favicon_pattern(&mut img, &fav_rgba, cell_w, cell_h, pattern_start_y, margin_x as u32);
             }
         }
     }
 
-    // Encode to PNG
     let mut buf: Vec<u8> = Vec::new();
-    img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
-        .map_err(|e| AppError::Other(format!("PNG encode error: {e}")))?;
+    img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png).map_err(|e| AppError::Other(e.to_string()))?;
     Ok(buf)
 }
 
-fn decode_and_resize_favicon(bytes: &[u8], w: u32, h: u32) -> Option<RgbaImage> {
+fn decode_and_resize_favicon(bytes: &[u8], cell_w: u32, cell_h: u32) -> Option<RgbaImage> {
     let src = image::load_from_memory(bytes).ok()?.into_rgba8();
     let src_dyn: DynamicImage = src.into();
-    let mut dst = DynamicImage::ImageRgba8(RgbaImage::new(w, h));
+    
+    // 1. Force a square dimension (e.g., 90% of the smaller cell dimension)
+    // Adding a small margin (0.9) helps the icons not touch each other when rotated.
+    let side = (cell_w.min(cell_h) as f32 * 0.9) as u32; 
+    
+    // 2. Create the destination as a PERFECT SQUARE
+    let mut dst = DynamicImage::ImageRgba8(RgbaImage::new(side, side));
     let opts = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
+    
     Resizer::new().resize(&src_dyn, &mut dst, &opts).ok()?;
     Some(dst.into_rgba8())
 }
@@ -158,61 +166,77 @@ fn draw_favicon_pattern(
     cell_w: u32,
     cell_h: u32,
     pattern_start_y: u32,
+    margin_x: u32, // New parameter!
 ) {
-    let fw = cell_w as f32;
-    let fh = cell_h as f32;
-    let half_fw = fw / 2.0;
-    let half_fh = fh / 2.0;
+    let angle = ROTATION_DEGREES.to_radians();
+    let (sin_a, cos_a) = angle.sin_cos();
 
-    // 10° CCW rotation inverse map: to find the source pixel for output (px, py),
-    // we rotate the offset vector by 10° CW (the inverse of CCW).
-    // For CCW rotation by θ: forward is (x·cosθ - y·sinθ, x·sinθ + y·cosθ)
-    // Inverse (CW):          sx = dx·cosθ + dy·sinθ, sy = -dx·sinθ + dy·cosθ
-    let angle = 10.0_f32.to_radians();
-    let cos_a = angle.cos();
-    let sin_a = angle.sin();
+    let fav_w = fav.width() as f32;
+    let fav_h = fav.height() as f32;
+    let out_cx = cell_w as f32 / 2.0;
+    let out_cy = cell_h as f32 / 2.0;
+    let in_cx = fav_w / 2.0;
+    let in_cy = fav_h / 2.0;
 
     for row in 0..ROWS {
         for col in 0..COLS {
-            let cell_x = col * cell_w;
+            // Apply the margin_x here to shift the whole grid inward
+            let cell_x = margin_x + col * cell_w;
             let cell_y = pattern_start_y + row * cell_h;
 
             for py in 0..cell_h {
                 for px in 0..cell_w {
-                    let dx = px as f32 - half_fw;
-                    let dy = py as f32 - half_fh;
+                    let dx = px as f32 - out_cx;
+                    let dy = py as f32 - out_cy;
 
-                    let sx = dx * cos_a + dy * sin_a + half_fw;
-                    let sy = -dx * sin_a + dy * cos_a + half_fh;
+                    let sx = dx * cos_a + dy * sin_a + in_cx;
+                    let sy = -dx * sin_a + dy * cos_a + in_cy;
 
-                    let src_pixel = if sx >= 0.0 && sy >= 0.0
-                        && (sx as u32) < cell_w && (sy as u32) < cell_h
-                    {
-                        *fav.get_pixel(sx as u32, sy as u32)
-                    } else {
-                        Rgba([255, 255, 255, 255])
-                    };
+                    if sx >= 0.0 && sy >= 0.0 && sx < fav_w - 1.0 && sy < fav_h - 1.0 {
+                        let src_pixel = get_pixel_bilinear(fav, sx, sy);
+                        let canvas_x = cell_x + px;
+                        let canvas_y = cell_y + py;
 
-                    let canvas_x = cell_x + px;
-                    let canvas_y = cell_y + py;
-                    if canvas_x >= W || canvas_y >= H {
-                        continue;
+                        if canvas_x < W && canvas_y < H {
+                            let bg = canvas.get_pixel(canvas_x, canvas_y);
+                            let src_a = src_pixel[3] as f32 / 255.0 * 0.5;
+                            
+                            canvas.put_pixel(canvas_x, canvas_y, Rgba([
+                                blend(src_pixel[0], bg[0], src_a),
+                                blend(src_pixel[1], bg[1], src_a),
+                                blend(src_pixel[2], bg[2], src_a),
+                                255,
+                            ]));
+                        }
                     }
-
-                    // Composite src_pixel at 50% opacity over the existing canvas pixel
-                    let bg = *canvas.get_pixel(canvas_x, canvas_y);
-                    let src_a = src_pixel[3] as f32 / 255.0 * 0.5;
-                    let blended = Rgba([
-                        blend(src_pixel[0], bg[0], src_a),
-                        blend(src_pixel[1], bg[1], src_a),
-                        blend(src_pixel[2], bg[2], src_a),
-                        255,
-                    ]);
-                    canvas.put_pixel(canvas_x, canvas_y, blended);
                 }
             }
         }
     }
+}
+
+/// Smoothly samples pixels to prevent the "deformed/rounded" look
+fn get_pixel_bilinear(img: &RgbaImage, x: f32, y: f32) -> Rgba<u8> {
+    let x1 = x.floor() as u32;
+    let y1 = y.floor() as u32;
+    let x2 = x1 + 1;
+    let y2 = y1 + 1;
+
+    let fx = x - x1 as f32;
+    let fy = y - y1 as f32;
+
+    let p11 = img.get_pixel(x1, y1);
+    let p21 = img.get_pixel(x2, y1);
+    let p12 = img.get_pixel(x1, y2);
+    let p22 = img.get_pixel(x2, y2);
+
+    let mut res = [0u8; 4];
+    for i in 0..4 {
+        let top = p11[i] as f32 * (1.0 - fx) + p21[i] as f32 * fx;
+        let bottom = p12[i] as f32 * (1.0 - fx) + p22[i] as f32 * fx;
+        res[i] = (top * (1.0 - fy) + bottom * fy) as u8;
+    }
+    Rgba(res)
 }
 
 #[inline]
