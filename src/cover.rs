@@ -84,12 +84,36 @@ pub fn generate_cover(
     let font = FontRef::try_from_slice(FONT_BYTES)
         .map_err(|e| AppError::Other(format!("Font load error: {e}")))?;
 
-    // --- 1. Define Margins ---
+// --- 1. Define Margins ---
     let margin_x = 80.0; // This creates the "blank space" on the sides
     let margin_bottom = 80.0; // This creates the "blank space" at the bottom
 
-    // --- Title (top-left, aligned to margin) ---
-    let target_width = W as f32 - (margin_x * 2.0); // Allow room for margins
+    // --- 2. Pre-calculate Date Block Width ---
+    let date_scale = PxScale::from(30.0);
+    let date_line_height = 36.0;
+    let mut max_date_w = 0.0;
+    let mut date_lines = Vec::new();
+
+    if let Some(d) = date {
+        let weekday = d.format("%A").to_string().to_lowercase();
+        let day_month_year = format!("{} {} {}", d.day(), d.format("%B").to_string().to_lowercase(), d.year());
+        let time_str = format!("{:02}:{:02}", d.hour(), d.minute());
+
+        date_lines = vec![weekday, day_month_year, time_str];
+
+        for line in &date_lines {
+            let line_w = measure_text_width(line, date_scale, &font);
+            if line_w > max_date_w {
+                max_date_w = line_w;
+            }
+        }
+    }
+
+    // --- 3. Title (top-left, dynamically scaled to avoid date) ---
+    // Reserve space for margins, the max width of the date block, and a 40px gap
+    let date_gap = if max_date_w > 0.0 { 40.0 } else { 0.0 };
+    let target_width = W as f32 - (margin_x * 2.0) - max_date_w - date_gap; 
+    
     let mut font_size: f32 = 140.0;
     while font_size > 40.0 {
         if measure_text_width(title, PxScale::from(font_size), &font) <= target_width {
@@ -99,29 +123,15 @@ pub fn generate_cover(
     }
     let title_scale = PxScale::from(font_size);
     let title_baseline = 60.0 + font.as_scaled(title_scale).ascent();
-    // Use margin_x here:
     draw_text(&mut img, title, margin_x, title_baseline, title_scale, Rgba([0, 0, 0, 255]), &font);
 
-// --- UPDATED: Date block (top-right, aligned to margin) ---
-    if let Some(date) = date {
-        // 1. INCREASE FONT SIZE to make it bigger (e.g., 30.0)
-        let date_scale = PxScale::from(30.0);
+    // --- 4. Draw Date Block ---
+    if !date_lines.is_empty() {
         let date_ascent = font.as_scaled(date_scale).ascent();
-
-        // 2. ADJUST LINE SPACING proportionally to the larger font size
-        let date_line_height = 36.0;
-        
-        let weekday = date.format("%A").to_string().to_lowercase();
-        let day_month_year = format!("{} {} {}", date.day(), date.format("%B").to_string().to_lowercase(), date.year());
-        let time_str = format!("{:02}:{:02}", date.hour(), date.minute());
-
-        for (i, line) in [weekday.as_str(), day_month_year.as_str(), time_str.as_str()].iter().enumerate() {
+        for (i, line) in date_lines.iter().enumerate() {
             let line_w = measure_text_width(line, date_scale, &font);
-
-            // 3. CONFIRM ALIGNMENT: Right content boundary is W - margin_x. 
-            // Text starts at boundary - text width. This remains correct.
             let x = W as f32 - margin_x - line_w;
-            let y = 80.0 + date_ascent + i as f32 * date_line_height; // Use new height variable
+            let y = 80.0 + date_ascent + i as f32 * date_line_height;
             draw_text(&mut img, line, x, y, date_scale, Rgba([0, 0, 0, 255]), &font);
         }
     }
