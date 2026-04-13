@@ -102,10 +102,14 @@ pub fn generate_cover(
     // Use margin_x here:
     draw_text(&mut img, title, margin_x, title_baseline, title_scale, Rgba([0, 0, 0, 255]), &font);
 
-    // --- Date block (top-right, aligned to margin) ---
+// --- UPDATED: Date block (top-right, aligned to margin) ---
     if let Some(date) = date {
-        let date_scale = PxScale::from(20.0);
+        // 1. INCREASE FONT SIZE to make it bigger (e.g., 30.0)
+        let date_scale = PxScale::from(30.0);
         let date_ascent = font.as_scaled(date_scale).ascent();
+
+        // 2. ADJUST LINE SPACING proportionally to the larger font size
+        let date_line_height = 36.0;
         
         let weekday = date.format("%A").to_string().to_lowercase();
         let day_month_year = format!("{} {} {}", date.day(), date.format("%B").to_string().to_lowercase(), date.year());
@@ -113,9 +117,11 @@ pub fn generate_cover(
 
         for (i, line) in [weekday.as_str(), day_month_year.as_str(), time_str.as_str()].iter().enumerate() {
             let line_w = measure_text_width(line, date_scale, &font);
-            // Subtract margin_x from the right edge:
+
+            // 3. CONFIRM ALIGNMENT: Right content boundary is W - margin_x. 
+            // Text starts at boundary - text width. This remains correct.
             let x = W as f32 - margin_x - line_w;
-            let y = 30.0 + date_ascent + i as f32 * 22.0;
+            let y = 80.0 + date_ascent + i as f32 * date_line_height; // Use new height variable
             draw_text(&mut img, line, x, y, date_scale, Rgba([0, 0, 0, 255]), &font);
         }
     }
