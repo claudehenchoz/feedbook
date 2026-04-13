@@ -74,6 +74,8 @@ pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<V
     Some(bytes.to_vec())
 }
 
+// ... imports, constants, extract_domain_title, fetch_favicon remain unchanged ...
+
 /// Generates the cover image and returns it as PNG bytes.
 pub fn generate_cover(
     title: &str,
@@ -84,32 +86,45 @@ pub fn generate_cover(
     let font = FontRef::try_from_slice(FONT_BYTES)
         .map_err(|e| AppError::Other(format!("Font load error: {e}")))?;
 
-// --- 1. Define Margins ---
+    // --- 1. Define Margins ---
     let margin_x = 80.0; // This creates the "blank space" on the sides
     let margin_bottom = 80.0; // This creates the "blank space" at the bottom
 
-    // --- 2. Pre-calculate Date Block Width ---
+    // --- 2. Header Block: Title and Date ---
+
+    // A. Pre-calculate Date Strings and Width
     let date_scale = PxScale::from(30.0);
     let date_line_height = 36.0;
     let mut max_date_w = 0.0;
-    let mut date_lines = Vec::new();
-
-    if let Some(d) = date {
-        let weekday = d.format("%A").to_string().to_lowercase();
-        let day_month_year = format!("{} {} {}", d.day(), d.format("%B").to_string().to_lowercase(), d.year());
-        let time_str = format!("{:02}:{:02}", d.hour(), d.minute());
-
-        date_lines = vec![weekday, day_month_year, time_str];
-
-        for line in &date_lines {
-            let line_w = measure_text_width(line, date_scale, &font);
-            if line_w > max_date_w {
-                max_date_w = line_w;
+    
+    // We create a temporary scope to manage the lifetime of the string references
+    let date_strings = {
+        if let Some(d) = date {
+            let weekday = d.format("%A").to_string().to_lowercase();
+            let day_month_year = format!("{} {} {}", d.day(), d.format("%B").to_string().to_lowercase(), d.year());
+            let time_str = format!("{:02}:{:02}", d.hour(), d.minute());
+            
+            let lines = vec![weekday, day_month_year, time_str];
+            for line in &lines {
+                let line_w = measure_text_width(line, date_scale, &font);
+                if line_w > max_date_w {
+                    max_date_w = line_w;
+                }
             }
+            lines // Return the strings to extend their life
+        } else {
+            Vec::new()
         }
-    }
+    };
 
-    // --- 3. Title (top-left, dynamically scaled to avoid date) ---
+    // B. Calculate Title Position (locked center)
+    let initial_scale = PxScale::from(140.0);
+    let standard_ascent = font.as_scaled(initial_scale).ascent();
+    // We decide on a constant `title_v_center_y`. We calculate it based on
+    // the original code's top spacing of 60px for a standard ascent.
+    let title_v_center_y = 80.0 + (standard_ascent / 2.0);
+
+    // C. Calculate Title Font Size to fit, and final baseline
     // Reserve space for margins, the max width of the date block, and a 40px gap
     let date_gap = if max_date_w > 0.0 { 40.0 } else { 0.0 };
     let target_width = W as f32 - (margin_x * 2.0) - max_date_w - date_gap; 
@@ -122,13 +137,20 @@ pub fn generate_cover(
         font_size -= 2.0;
     }
     let title_scale = PxScale::from(font_size);
-    let title_baseline = 60.0 + font.as_scaled(title_scale).ascent();
+    let title_ascent = font.as_scaled(title_scale).ascent();
+    let title_descent_abs = font.as_scaled(title_scale).descent().abs();
+    let title_actual_height = title_ascent + title_descent_abs;
+    
+    // title_baseline = title_v_center_y + ((ascent + |descent|) / 2) - |descent|
+    let title_baseline = title_v_center_y + (title_actual_height / 2.0) - title_descent_abs;
+    
+    // Draw the title
     draw_text(&mut img, title, margin_x, title_baseline, title_scale, Rgba([0, 0, 0, 255]), &font);
 
-    // --- 4. Draw Date Block ---
-    if !date_lines.is_empty() {
+    // D. Draw Date Block (positioning can stay the same as it's not problem)
+    if !date_strings.is_empty() {
         let date_ascent = font.as_scaled(date_scale).ascent();
-        for (i, line) in date_lines.iter().enumerate() {
+        for (i, line) in date_strings.iter().enumerate() {
             let line_w = measure_text_width(line, date_scale, &font);
             let x = W as f32 - margin_x - line_w;
             let y = 80.0 + date_ascent + i as f32 * date_line_height;
@@ -136,7 +158,7 @@ pub fn generate_cover(
         }
     }
 
-    // --- 2. Calculate Tiled Grid with Margins ---
+    // --- 3. Calculate Tiled Grid with Margins ---
     
     // Available width after margins
     let available_w = W as f32 - (margin_x * 2.0);
@@ -148,8 +170,11 @@ pub fn generate_cover(
     let grid_total_h = (cell_size * ROWS) as f32;
 
     // 3. Shift the pattern down to anchor it to the bottom margin.
-    // We use .max() to ensure it doesn't accidentally overlap the title if dimensions change.
-    let min_start_y = title_baseline + 60.0; 
+    // We calculate `min_start_y` based on the actual bottom of the title's
+    // dynamic text slot. This ensures consistent spacing.
+    let title_bottom_y = title_baseline + font.as_scaled(title_scale).descent().abs();
+    let min_start_y = title_bottom_y + 60.0; 
+    
     let pattern_start_y = (H as f32 - margin_bottom - grid_total_h).max(min_start_y) as u32;
 
     if cell_size > 0 {
