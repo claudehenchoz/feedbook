@@ -121,9 +121,10 @@ pub fn build_epub(
     feed_title:  &str,
     articles:    &[ScrapedArticle],
     epub_images: &HashMap<String, ProcessedImage>,
+    cover_png:   Option<Vec<u8>>,
     output_path: &PathBuf,
 ) -> Result<(), AppError> {
-    let chapters: Vec<EpubChapter> = articles
+    let article_chapters: Vec<EpubChapter> = articles
         .iter()
         .map(|article| {
             let xhtml = build_chapter_xhtml(article, epub_images);
@@ -138,12 +139,27 @@ pub fn build_epub(
         .language("en")
         .resource(("stylesheet.css", STYLESHEET));
 
+    let mut all_chapters: Vec<EpubChapter> = Vec::new();
+
+    if let Some(png_bytes) = cover_png {
+        builder = builder.cover_image(("cover.png", png_bytes));
+        let cover_xhtml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Cover</title><style type="text/css">body{margin:0;padding:0;}img{width:100%;display:block;}</style></head>
+<body><img src="cover.png" alt="Cover"/></body>
+</html>"#;
+        all_chapters.push(EpubChapter::new("Cover").xhtml(cover_xhtml));
+    }
+
+    all_chapters.extend(article_chapters);
+
     for img in epub_images.values() {
         builder = builder.resource((img.filename.as_str(), img.data.as_slice()));
     }
 
     builder
-        .chapter(chapters)
+        .chapter(all_chapters)
         .write()
         .save(output_path)
         .map_err(|e| AppError::Epub(e.to_string()))?;

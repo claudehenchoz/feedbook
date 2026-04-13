@@ -1,5 +1,6 @@
 mod cache;
 mod cli;
+mod cover;
 mod epub;
 mod error;
 mod feed;
@@ -30,7 +31,10 @@ async fn main() -> Result<(), AppError> {
     let cached_urls: HashSet<String> = cache::get_cached_urls(&conn, &args.url)?;
 
     // Fetch and parse feed
-    let (feed_title, mut feed_items) = feed::fetch_feed(&client, &args.url).await?;
+    let feed_data = feed::fetch_feed(&client, &args.url).await?;
+    let feed_title = feed_data.title;
+    let feed_date  = feed_data.date;
+    let mut feed_items = feed_data.items;
     if let Some(n) = args.limit {
         feed_items.truncate(n);
     }
@@ -108,9 +112,20 @@ async fn main() -> Result<(), AppError> {
             .collect()
     };
 
+    // Generate cover image
+    let domain_title = cover::extract_domain_title(&args.url);
+    let favicon_bytes = cover::fetch_favicon(&client, &args.url).await;
+    let cover_png = match cover::generate_cover(&domain_title, feed_date, favicon_bytes.as_deref()) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            eprintln!("Cover generation failed: {e}");
+            None
+        }
+    };
+
     println!("Building EPUB with {} article(s)...", all_articles.len());
     let output_path = epub::derive_output_path(&feed_title);
-    epub::build_epub(&feed_title, &all_articles, &epub_images, &output_path)?;
+    epub::build_epub(&feed_title, &all_articles, &epub_images, cover_png, &output_path)?;
     println!("Written: {}", output_path.display());
 
     Ok(())

@@ -8,10 +8,16 @@ pub struct FeedItem {
     pub date: Option<DateTime<Utc>>,
 }
 
+pub struct FeedData {
+    pub title: String,
+    pub date:  Option<DateTime<Utc>>,
+    pub items: Vec<FeedItem>,
+}
+
 pub async fn fetch_feed(
     client: &reqwest::Client,
     url: &str,
-) -> Result<(String, Vec<FeedItem>), AppError> {
+) -> Result<FeedData, AppError> {
     let bytes = client.get(url).send().await?.bytes().await?;
     let feed = feed_rs::parser::parse(bytes.as_ref())
         .map_err(|e| AppError::Feed(e.to_string()))?;
@@ -20,6 +26,8 @@ pub async fn fetch_feed(
         .title
         .map(|t| t.content)
         .unwrap_or_else(|| "Feed".to_string());
+
+    let feed_date = feed.published.or(feed.updated);
 
     let items = feed
         .entries
@@ -35,5 +43,5 @@ pub async fn fetch_feed(
         })
         .collect();
 
-    Ok((feed_title, items))
+    Ok(FeedData { title: feed_title, date: feed_date, items })
 }
