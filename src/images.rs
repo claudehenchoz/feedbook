@@ -118,6 +118,37 @@ pub fn strip_external_imgs(html: &str) -> String {
     .into_owned()
 }
 
+/// Neutralizes attributes whose values contain structural characters like `{` or `"`
+/// (typically JSON blobs such as Substack's `data-attrs`). dom_smoothie's
+/// `fix_lazy_images` pass has an overly-loose heuristic that can copy such values
+/// into `src`/`srcset` if they happen to contain an image extension substring,
+/// producing mangled URLs like `https://site.example/p/{"src":"...png",...}`.
+///
+/// We blank the value rather than remove the attribute entirely to keep the
+/// surrounding HTML well-formed and minimize diff against the input.
+pub fn sanitize_json_attrs(html: &str) -> String {
+    static ATTR_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = ATTR_RE.get_or_init(|| {
+        // Matches: attr-name="value" where value is anything up to the next "
+        // Attribute names per HTML spec: letters, digits, hyphens, underscores, colons.
+        Regex::new(r#"([a-zA-Z_:][a-zA-Z0-9_:.\-]*)="([^"]*)""#).unwrap()
+    });
+
+    re.replace_all(html, |caps: &regex::Captures| {
+        let name = &caps[1];
+        let value = &caps[2];
+
+        // `{` appears directly; `"` inside an attribute value is encoded as &quot;.
+        // Either signals a JSON-ish blob that will confuse dom_smoothie.
+        if value.contains('{') || value.contains("&quot;") {
+            format!(r#"{}="""#, name)
+        } else {
+            caps[0].to_string()
+        }
+    })
+    .into_owned()
+}
+
 /// Downloads and processes images that are not already in the cache.
 /// Returns only images that need to be inserted into the DB.
 pub async fn download_and_process(
