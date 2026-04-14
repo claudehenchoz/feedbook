@@ -32,12 +32,39 @@ pub fn extract_domain_title(feed_url: &str) -> String {
 /// first and returns the first one whose bytes decode as a raster image
 /// at least 64 px wide/tall, or the first that decodes at all.
 pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<Vec<u8>> {
+    let parsed = url::Url::parse(feed_url).ok()?;
+    let scheme = parsed.scheme();
+    let original_host = parsed.host_str()?;
+
+    // Attempt 1: use the feed URL's host as-is.
+    // For Feedburner-style feeds (feeds.example.com/foo) this often won't have
+    // a usable homepage, but for direct feeds (example.com/feed.xml) it will.
+    let base1 = url::Url::parse(&format!("{}://{}", scheme, original_host)).ok()?;
+    if let Some(bytes) = try_favicon_from_base(client, &base1).await {
+        return Some(bytes);
+    }
+
+    // Attempt 2: reduce to apex domain and try again.
+    // "feeds.arstechnica.com" → "arstechnica.com"
+    // "www.bbc.co.uk"         → "bbc.co.uk"
+    let apex_host = reduce_to_apex(original_host);
+    if apex_host != original_host {
+        if let Ok(base2) = url::Url::parse(&format!("{}://{}", scheme, apex_host)) {
+            if let Some(bytes) = try_favicon_from_base(client, &base2).await {
+                return Some(bytes);
+            }
+        }
+    }
+
+    None
+}
+
+/// Tries to find a usable favicon for the site rooted at `base`.
+/// Scrapes <link rel="icon"> tags from the homepage, falls back to /favicon.ico,
+/// and returns the largest decodable raster image (preferring ≥64 px).
+async fn try_favicon_from_base(client: &reqwest::Client, base: &url::Url) -> Option<Vec<u8>> {
     use dom_query::Document;
 
-    let parsed = url::Url::parse(feed_url).ok()?;
-    let base = url::Url::parse(&format!("{}://{}", parsed.scheme(), parsed.host_str()?)).ok()?;
-
-    // --- Gather candidate URLs, largest-first ---
     let mut candidates: Vec<(u32, url::Url)> = Vec::new();
 
     // Fetch homepage HTML (best-effort)
@@ -46,7 +73,6 @@ pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<V
             if let Ok(body) = resp.text().await {
                 let doc = Document::from(body.as_str());
 
-                // (selector, default size hint if `sizes` attr missing)
                 let selectors: &[(&str, u32)] = &[
                     ("link[rel='apple-touch-icon']", 180),
                     ("link[rel='apple-touch-icon-precomposed']", 180),
@@ -64,7 +90,6 @@ pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<V
                             Ok(u) if u.scheme() == "http" || u.scheme() == "https" => u,
                             _ => continue,
                         };
-                        // Parse `sizes="NxN"` attribute if present
                         let size = node
                             .attr("sizes")
                             .and_then(|s| s.split(|c: char| c == 'x' || c == 'X').next().map(|n| n.to_string()))
@@ -91,7 +116,6 @@ pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<V
     let mut seen = std::collections::HashSet::new();
     candidates.retain(|(_, u)| seen.insert(u.clone()));
 
-    // --- Try each candidate: fetch, verify it decodes, prefer ≥64 px ---
     let mut fallback: Option<Vec<u8>> = None;
 
     for (_, url) in candidates {
@@ -103,23 +127,79 @@ pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<V
             _ => continue,
         };
 
-        // Verify it's actually a decodable raster image (skips SVGs, HTML error pages, etc.)
+        // Quick magic-number check before handing to the decoder — avoids
+        // trying to decode HTML error pages served with image content-types.
+        if !looks_like_image(&bytes) {
+            continue;
+        }
+
         let img = match image::load_from_memory(&bytes) {
             Ok(img) => img,
             Err(_) => continue,
         };
 
         if img.width().max(img.height()) >= 64 {
-            return Some(bytes); // good enough — take it
+            return Some(bytes);
         }
 
-        // Keep the first decodable-but-small one as fallback
         if fallback.is_none() {
             fallback = Some(bytes);
         }
     }
 
     fallback
+}
+
+/// Reduces a hostname to its registrable domain (apex).
+/// "feeds.arstechnica.com" → "arstechnica.com"
+/// "www.bbc.co.uk"         → "bbc.co.uk"
+/// "example.com"           → "example.com"
+fn reduce_to_apex(host: &str) -> &str {
+    const MULTI_PART_TLDS: &[&str] = &[
+        ".co.uk", ".co.jp", ".co.kr", ".co.nz", ".co.za",
+        ".com.au", ".com.br", ".com.cn", ".com.mx", ".com.tw",
+        ".org.uk", ".net.au", ".ac.uk", ".gov.uk",
+    ];
+
+    // Handle multi-part TLDs first
+    for suffix in MULTI_PART_TLDS {
+        if let Some(prefix) = host.strip_suffix(suffix) {
+            // Find the last dot in the prefix to get the registrable part
+            return match prefix.rfind('.') {
+                Some(idx) => &host[idx + 1..],
+                None => host, // host is already "something.co.uk" with no subdomain
+            };
+        }
+    }
+
+    // Standard case: take the last two dot-separated segments
+    let dot_count = host.matches('.').count();
+    if dot_count <= 1 {
+        return host; // already apex (e.g. "example.com") or weird (e.g. "localhost")
+    }
+    let pos = host.match_indices('.').nth(dot_count - 2).unwrap().0;
+    &host[pos + 1..]
+}
+
+/// Quick check of file magic to verify bytes look like a supported image format.
+/// Avoids handing HTML or other garbage to the image decoder.
+fn looks_like_image(bytes: &[u8]) -> bool {
+    if bytes.len() < 8 {
+        return false;
+    }
+    // PNG
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']) { return true; }
+    // JPEG
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) { return true; }
+    // GIF
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { return true; }
+    // ICO (00 00 01 00) or CUR (00 00 02 00)
+    if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) { return true; }
+    // WebP: "RIFF" + 4 size bytes + "WEBP"
+    if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WEBP" { return true; }
+    // BMP
+    if bytes.starts_with(b"BM") { return true; }
+    false
 }
 
 /// Generates the cover image and returns it as PNG bytes.
