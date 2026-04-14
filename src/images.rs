@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::io::Cursor;
 use futures::StreamExt;
-use image::{DynamicImage, ImageFormat, RgbImage, RgbaImage};
+use image::{DynamicImage, ImageFormat};
 use regex::Regex;
 use sha1::{Digest, Sha1};
-use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 
 pub struct ProcessedImage {
     pub url_sha1:     String,
@@ -223,7 +222,7 @@ fn process_image_bytes(
     let img = if img.width() > max_width {
         let new_w = max_width;
         let new_h = ((img.height() as f64 * max_width as f64 / img.width() as f64) as u32).max(1);
-        resize_image(img, new_w, new_h, has_alpha)?
+        img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
     } else {
         img
     };
@@ -248,22 +247,4 @@ fn process_image_bytes(
         filename,
         data: buf,
     })
-}
-
-fn resize_image(img: DynamicImage, new_w: u32, new_h: u32, has_alpha: bool) -> Option<DynamicImage> {
-    let opts = ResizeOptions::new()
-        .resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
-
-    let mut dst: DynamicImage = if has_alpha {
-        DynamicImage::ImageRgba8(RgbaImage::new(new_w, new_h))
-    } else {
-        DynamicImage::ImageRgb8(RgbImage::new(new_w, new_h))
-    };
-
-    if let Err(e) = Resizer::new().resize(&img, &mut dst, &opts) {
-        eprintln!("Image resize error: {}", e);
-        return None;
-    }
-
-    Some(dst)
 }

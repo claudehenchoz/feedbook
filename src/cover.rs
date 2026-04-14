@@ -1,8 +1,7 @@
 use std::io::Cursor;
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
-use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
+use image::{ImageFormat, Rgba, RgbaImage};
 use crate::error::AppError;
 
 static FONT_BYTES: &[u8] = include_bytes!("../fonts/texgyreheros-bold.otf");
@@ -193,18 +192,18 @@ pub fn generate_cover(
 
 fn decode_and_resize_favicon(bytes: &[u8], cell_w: u32, cell_h: u32) -> Option<RgbaImage> {
     let src = image::load_from_memory(bytes).ok()?.into_rgba8();
-    let src_dyn: DynamicImage = src.into();
-    
-    // 1. Force a square dimension (e.g., 90% of the smaller cell dimension)
-    // Adding a small margin (0.9) helps the icons not touch each other when rotated.
-    let side = (cell_w.min(cell_h) as f32 * 0.9) as u32; 
-    
-    // 2. Create the destination as a PERFECT SQUARE
-    let mut dst = DynamicImage::ImageRgba8(RgbaImage::new(side, side));
-    let opts = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
-    
-    Resizer::new().resize(&src_dyn, &mut dst, &opts).ok()?;
-    Some(dst.into_rgba8())
+
+    // Force a square dimension (90% of the smaller cell dimension)
+    // so icons don't touch each other when rotated.
+    let side = (cell_w.min(cell_h) as f32 * 0.9) as u32;
+
+    let resized = image::imageops::resize(
+        &src,
+        side,
+        side,
+        image::imageops::FilterType::Lanczos3,
+    );
+    Some(resized)
 }
 
 fn draw_favicon_pattern(
