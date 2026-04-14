@@ -27,53 +27,100 @@ pub fn extract_domain_title(feed_url: &str) -> String {
     }
 }
 
-/// Discovers the site's icons via site_icons (HTML scraping + manifest + favicon.ico),
-/// picks the smallest raster icon that is still ≥ 64 px wide/tall (or the largest
-/// available if none meet the threshold), then fetches its raw bytes.
+/// Discovers favicon candidates by scraping `<link rel="icon">` tags from the
+/// site's homepage, falling back to `/favicon.ico`. Tries candidates largest-
+/// first and returns the first one whose bytes decode as a raster image
+/// at least 64 px wide/tall, or the first that decodes at all.
 pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<Vec<u8>> {
+    use dom_query::Document;
+
     let parsed = url::Url::parse(feed_url).ok()?;
-    let base_url = format!("{}://{}", parsed.scheme(), parsed.host_str()?);
+    let base = url::Url::parse(&format!("{}://{}", parsed.scheme(), parsed.host_str()?)).ok()?;
 
-    let icons = site_icons::SiteIcons::new()
-        .load_website(&base_url, false)
-        .await
-        .ok()?;
+    // --- Gather candidate URLs, largest-first ---
+    let mut candidates: Vec<(u32, url::Url)> = Vec::new();
 
-    // Filter to raster formats only (SVG can't be decoded with the image crate)
-    let raster: Vec<_> = icons
-        .iter()
-        .filter(|i| !matches!(i.info, site_icons::IconInfo::SVG { .. }))
-        .collect();
+    // Fetch homepage HTML (best-effort)
+    if let Ok(resp) = client.get(base.as_str()).send().await {
+        if resp.status().is_success() {
+            if let Ok(body) = resp.text().await {
+                let doc = Document::from(body.as_str());
 
-    if raster.is_empty() {
+                // (selector, default size hint if `sizes` attr missing)
+                let selectors: &[(&str, u32)] = &[
+                    ("link[rel='apple-touch-icon']", 180),
+                    ("link[rel='apple-touch-icon-precomposed']", 180),
+                    ("link[rel='icon']", 32),
+                    ("link[rel='shortcut icon']", 16),
+                ];
+
+                for (sel, default_size) in selectors {
+                    for node in doc.select(sel).iter() {
+                        let href = node.attr("href").unwrap_or_default();
+                        if href.is_empty() {
+                            continue;
+                        }
+                        let abs = match base.join(&href) {
+                            Ok(u) if u.scheme() == "http" || u.scheme() == "https" => u,
+                            _ => continue,
+                        };
+                        // Parse `sizes="NxN"` attribute if present
+                        let size = node
+                            .attr("sizes")
+                            .and_then(|s| s.split(|c: char| c == 'x' || c == 'X').next().map(|n| n.to_string()))
+                            .and_then(|n| n.trim().parse::<u32>().ok())
+                            .unwrap_or(*default_size);
+                        candidates.push((size, abs));
+                    }
+                }
+            }
+        }
+    }
+
+    // Always try /favicon.ico as a last resort
+    if let Ok(u) = base.join("/favicon.ico") {
+        candidates.push((16, u));
+    }
+
+    if candidates.is_empty() {
         return None;
     }
 
-    // Icons are sorted largest-first. Walk from the end to find the smallest
-    // icon that still meets the 64 px threshold; fall back to the largest.
-    let best = raster
-        .iter()
-        .rev()
-        .find(|i| i.info.size().is_some_and(|s| s.max_rect() >= 64))
-        .or_else(|| raster.first())
-        .copied()?;
+    // Sort largest-first, dedupe by URL while preserving order
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|(_, u)| seen.insert(u.clone()));
 
-    let bytes = client
-        .get(best.url.as_str())
-        .send()
-        .await
-        .ok()?
-        .bytes()
-        .await
-        .ok()?;
+    // --- Try each candidate: fetch, verify it decodes, prefer ≥64 px ---
+    let mut fallback: Option<Vec<u8>> = None;
 
-    if bytes.is_empty() {
-        return None;
+    for (_, url) in candidates {
+        let bytes = match client.get(url.as_str()).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(b) if !b.is_empty() => b.to_vec(),
+                _ => continue,
+            },
+            _ => continue,
+        };
+
+        // Verify it's actually a decodable raster image (skips SVGs, HTML error pages, etc.)
+        let img = match image::load_from_memory(&bytes) {
+            Ok(img) => img,
+            Err(_) => continue,
+        };
+
+        if img.width().max(img.height()) >= 64 {
+            return Some(bytes); // good enough — take it
+        }
+
+        // Keep the first decodable-but-small one as fallback
+        if fallback.is_none() {
+            fallback = Some(bytes);
+        }
     }
-    Some(bytes.to_vec())
+
+    fallback
 }
-
-// ... imports, constants, extract_domain_title, fetch_favicon remain unchanged ...
 
 /// Generates the cover image and returns it as PNG bytes.
 pub fn generate_cover(
