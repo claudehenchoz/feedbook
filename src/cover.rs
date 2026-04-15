@@ -341,6 +341,40 @@ fn draw_favicon_pattern(
     pattern_start_y: u32,
     margin_x: u32,
 ) {
+    // Step 1: Render one stamp with all the expensive work (rotation,
+    // supersampling, bilinear filtering, opacity).
+    let stamp = render_stamp(fav, cell_w, cell_h);
+
+    // Step 2: Blit that stamp onto every grid cell — just alpha compositing.
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            let cell_x = margin_x + col * cell_w;
+            let cell_y = pattern_start_y + row * cell_h;
+
+            for py in 0..cell_h {
+                for px in 0..cell_w {
+                    let (pm_r, pm_g, pm_b, final_a) = stamp[(py * cell_w + px) as usize];
+
+                    if final_a > 0.0 {
+                        let canvas_x = cell_x + px;
+                        let canvas_y = cell_y + py;
+                        if canvas_x < W && canvas_y < H {
+                            let bg = canvas.get_pixel(canvas_x, canvas_y);
+                            let r = (pm_r + bg[0] as f32 * (1.0 - final_a)) as u8;
+                            let g = (pm_g + bg[1] as f32 * (1.0 - final_a)) as u8;
+                            let b = (pm_b + bg[2] as f32 * (1.0 - final_a)) as u8;
+                            canvas.put_pixel(canvas_x, canvas_y, Rgba([r, g, b, 255]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Renders the rotated, supersampled favicon into a single cell-sized buffer.
+/// Each element is (pre_multiplied_r, pre_multiplied_g, pre_multiplied_b, alpha).
+fn render_stamp(fav: &RgbaImage, cell_w: u32, cell_h: u32) -> Vec<(f32, f32, f32, f32)> {
     let angle = ROTATION_DEGREES.to_radians();
     let (sin_a, cos_a) = angle.sin_cos();
 
@@ -351,64 +385,40 @@ fn draw_favicon_pattern(
     let in_cx = fav_w / 2.0;
     let in_cy = fav_h / 2.0;
 
-    // 2x2 Supersampling offsets within a single pixel
-    let ss_offsets = [(-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)];
+    let ss_offsets = [(-0.25f32, -0.25f32), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)];
     let opacity = 0.5;
 
-    for row in 0..ROWS {
-        for col in 0..COLS {
-            let cell_x = margin_x + col * cell_w;
-            let cell_y = pattern_start_y + row * cell_h;
+    let mut stamp = vec![(0.0f32, 0.0f32, 0.0f32, 0.0f32); (cell_w * cell_h) as usize];
 
-            for py in 0..cell_h {
-                for px in 0..cell_w {
-                    let mut r_acc = 0.0;
-                    let mut g_acc = 0.0;
-                    let mut b_acc = 0.0;
-                    let mut a_acc = 0.0;
+    for py in 0..cell_h {
+        for px in 0..cell_w {
+            let mut r_acc = 0.0f32;
+            let mut g_acc = 0.0f32;
+            let mut b_acc = 0.0f32;
+            let mut a_acc = 0.0f32;
 
-                    // Take 4 samples per pixel
-                    for (ox, oy) in ss_offsets {
-                        let dx = (px as f32 + ox) - out_cx;
-                        let dy = (py as f32 + oy) - out_cy;
+            for (ox, oy) in ss_offsets {
+                let dx = (px as f32 + ox) - out_cx;
+                let dy = (py as f32 + oy) - out_cy;
+                let sx = dx * cos_a + dy * sin_a + in_cx;
+                let sy = -dx * sin_a + dy * cos_a + in_cy;
 
-                        let sx = dx * cos_a + dy * sin_a + in_cx;
-                        let sy = -dx * sin_a + dy * cos_a + in_cy;
-
-                        // Check bounds for this specific sample
-                        if sx >= 0.0 && sy >= 0.0 && sx < fav_w - 1.0 && sy < fav_h - 1.0 {
-                            let p = get_pixel_bilinear(fav, sx, sy);
-                            let sample_a = (p[3] as f32 / 255.0) * opacity;
-                            
-                            // Accumulate pre-multiplied colors
-                            r_acc += p[0] as f32 * sample_a;
-                            g_acc += p[1] as f32 * sample_a;
-                            b_acc += p[2] as f32 * sample_a;
-                            a_acc += sample_a;
-                        }
-                    }
-
-                    // Average the 4 samples
-                    let final_a = a_acc / 4.0;
-                    if final_a > 0.0 {
-                        let canvas_x = cell_x + px;
-                        let canvas_y = cell_y + py;
-
-                        if canvas_x < W && canvas_y < H {
-                            let bg = canvas.get_pixel(canvas_x, canvas_y);
-                            
-                            // Blend accumulated foreground over background
-                            let r = (r_acc / 4.0 + bg[0] as f32 * (1.0 - final_a)) as u8;
-                            let g = (g_acc / 4.0 + bg[1] as f32 * (1.0 - final_a)) as u8;
-                            let b = (b_acc / 4.0 + bg[2] as f32 * (1.0 - final_a)) as u8;
-
-                            canvas.put_pixel(canvas_x, canvas_y, Rgba([r, g, b, 255]));
-                        }
-                    }
+                if sx >= 0.0 && sy >= 0.0 && sx < fav_w - 1.0 && sy < fav_h - 1.0 {
+                    let p = get_pixel_bilinear(fav, sx, sy);
+                    let sample_a = (p[3] as f32 / 255.0) * opacity;
+                    r_acc += p[0] as f32 * sample_a;
+                    g_acc += p[1] as f32 * sample_a;
+                    b_acc += p[2] as f32 * sample_a;
+                    a_acc += sample_a;
                 }
             }
+
+            let final_a = a_acc / 4.0;
+            stamp[(py * cell_w + px) as usize] = (r_acc / 4.0, g_acc / 4.0, b_acc / 4.0, final_a);
         }
     }
+
+    stamp
 }
 
 /// Improved Bilinear sampler with safety checks
