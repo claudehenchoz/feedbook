@@ -118,29 +118,40 @@ pub fn strip_external_imgs(html: &str) -> String {
     .into_owned()
 }
 
-/// Neutralizes attributes whose values contain structural characters like `{` or `"`
-/// (typically JSON blobs such as Substack's `data-attrs`). dom_smoothie's
-/// `fix_lazy_images` pass has an overly-loose heuristic that can copy such values
-/// into `src`/`srcset` if they happen to contain an image extension substring,
-/// producing mangled URLs like `https://site.example/p/{"src":"...png",...}`.
+/// Neutralizes `data-*` attributes whose values could be misinterpreted as image
+/// sources by dom_smoothie's `fix_lazy_images` pass. That pass copies any
+/// attribute value containing an image-extension substring into `src` or `srcset`,
+/// which corrupts `src` when sites put JSON blobs (Substack's `data-attrs`) or
+/// bare filenames (Rock Paper Shotgun's `data-uri`) on their img tags.
 ///
-/// We blank the value rather than remove the attribute entirely to keep the
-/// surrounding HTML well-formed and minimize diff against the input.
-pub fn sanitize_json_attrs(html: &str) -> String {
+/// We blank the value rather than remove the attribute to keep surrounding HTML
+/// well-formed and minimize churn.
+pub fn sanitize_data_attrs(html: &str) -> String {
     static ATTR_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let re = ATTR_RE.get_or_init(|| {
-        // Matches: attr-name="value" where value is anything up to the next "
-        // Attribute names per HTML spec: letters, digits, hyphens, underscores, colons.
-        Regex::new(r#"([a-zA-Z_:][a-zA-Z0-9_:.\-]*)="([^"]*)""#).unwrap()
+        // Matches: data-foo="value" — any data-* attribute with a double-quoted value.
+        Regex::new(r#"(data-[a-zA-Z0-9_:.\-]*)="([^"]*)""#).unwrap()
     });
+
+    // Image extensions dom_smoothie's heuristic keys on.
+    const IMG_EXTS: &[&str] = &[
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".svg",
+    ];
 
     re.replace_all(html, |caps: &regex::Captures| {
         let name = &caps[1];
         let value = &caps[2];
+        let lower = value.to_ascii_lowercase();
 
-        // `{` appears directly; `"` inside an attribute value is encoded as &quot;.
-        // Either signals a JSON-ish blob that will confuse dom_smoothie.
-        if value.contains('{') || value.contains("&quot;") {
+        // Blank if the value contains structural JSON characters (Substack case)
+        // OR any image extension substring (Rock Paper Shotgun case, and the
+        // general pattern of data-* attrs whose values dom_smoothie would grab).
+        let looks_like_image_hint =
+            value.contains('{')
+            || value.contains("&quot;")
+            || IMG_EXTS.iter().any(|ext| lower.contains(ext));
+
+        if looks_like_image_hint {
             format!(r#"{}="""#, name)
         } else {
             caps[0].to_string()

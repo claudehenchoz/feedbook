@@ -72,7 +72,7 @@ pub async fn scrape_articles(
                 // Article contains StrTendril (!Send), so convert to owned types inside
                 // the blocking thread before returning across the thread boundary.
                 let parse_result = tokio::task::spawn_blocking(move || {
-                    let html = crate::images::sanitize_json_attrs(&html);
+                    let html = crate::images::sanitize_data_attrs(&html);
                     Readability::new(html, Some(&url_str), None)
                         .and_then(|mut r| r.parse())
                         .map(|a| (a.title, a.byline, a.published_time, a.content.to_string()))
