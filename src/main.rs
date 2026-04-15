@@ -7,12 +7,19 @@ mod feed;
 mod images;
 mod sanitize;
 mod scraper;
+mod throttle;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use clap::Parser;
 use cli::Args;
+use console::style;
 use error::AppError;
+use futures::StreamExt;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use tokio::sync::{Mutex, Semaphore};
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
@@ -39,52 +46,285 @@ async fn main() -> Result<(), AppError> {
         feed_items.truncate(n);
     }
 
-    // Only fetch articles not already in cache (unless --force)
+    // Partition into items that need fetching vs those already in cache
+    let feed_item_count = feed_items.len();
     let to_fetch: Vec<_> = feed_items
         .into_iter()
         .filter(|item| args.force || !cached_urls.contains(&item.url))
         .collect();
+    let cached_count = feed_item_count - to_fetch.len();
 
-    if !to_fetch.is_empty() {
-        println!("Fetching {} new article(s)...", to_fetch.len());
-        let new_articles = scraper::scrape_articles(&client, to_fetch).await;
+    // ── Shared pipeline state ─────────────────────────────────────────────────
 
-        // Download and cache images for newly scraped articles
-        if !args.no_images {
-            let cached_sha1s = cache::get_cached_image_sha1s(&conn)?;
+    let host_times = throttle::new_host_times();
+    // Global cap on concurrent image downloads + processing (per Semaphore permit)
+    let image_sem  = Arc::new(Semaphore::new(8));
+    let sanitizer  = sanitize::build_sanitizer();
 
-            // Collect all unique (raw_src, absolute_url) pairs not yet in image cache
-            let mut seen_abs: HashSet<String> = HashSet::new();
-            let uncached_urls: Vec<(String, String)> = new_articles
-                .iter()
-                .filter_map(|a| a.html.as_deref().zip(Some(a.url.as_str())))
-                .flat_map(|(html, url)| images::extract_image_urls(html, url))
-                .filter(|(_, abs)| {
-                    !cached_sha1s.contains(&images::url_sha1(abs))
-                        && seen_abs.insert(abs.clone())
-                })
-                .collect();
+    // Image SHA1 dedup: start with what is already in the DB
+    let cached_sha1s: HashSet<String> = if args.no_images {
+        HashSet::new()
+    } else {
+        cache::get_cached_image_sha1s(&conn)?
+    };
+    let seen_sha1s = Arc::new(Mutex::new(cached_sha1s));
 
-            if !uncached_urls.is_empty() {
-                println!("Fetching {} image(s)...", uncached_urls.len());
-                let new_images = images::download_and_process(
-                    &client,
-                    uncached_urls,
-                    args.max_image_width,
-                )
-                .await;
-                for img in &new_images {
-                    cache::insert_image(&conn, img)?;
-                }
-            }
-        }
+    // Live counters for progress bar messages
+    let article_fetched  = Arc::new(AtomicU64::new(0));
+    let img_fetched      = Arc::new(AtomicU64::new(0));
+    let img_hits         = Arc::new(AtomicU64::new(0));
 
-        for article in &new_articles {
-            cache::insert_article(&conn, &args.url, article)?;
-        }
+    // ── MultiProgress bars ────────────────────────────────────────────────────
+
+    let mp = MultiProgress::new();
+
+    let article_pb = mp.add(ProgressBar::new(feed_item_count as u64));
+    article_pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} articles  {msg}"
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
+    // Cached articles are already done — pre-fill them
+    if cached_count > 0 {
+        article_pb.inc(cached_count as u64);
+        article_pb.set_message(
+            style(format!("{} cached", cached_count)).dim().to_string()
+        );
     }
 
-    // Load all articles for this feed from cache (respects limit)
+    let image_pb: Option<ProgressBar> = if args.no_images || to_fetch.is_empty() {
+        None
+    } else {
+        let pb = mp.add(ProgressBar::new(0));
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.cyan} [{bar:40.magenta/blue}] {pos}/{len} images  {msg}"
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+        Some(pb)
+    };
+
+    let cover_sp = mp.add(ProgressBar::new_spinner());
+    cover_sp.set_style(
+        ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap()
+    );
+
+    let epub_sp = mp.add(ProgressBar::new_spinner());
+    epub_sp.set_style(
+        ProgressStyle::with_template("{spinner:.green} {msg}").unwrap()
+    );
+
+    // ── Start favicon fetch immediately (only needs the feed URL) ─────────────
+
+    let domain_title    = cover::extract_domain_title(&args.url);
+    let client_favicon  = client.clone();
+    let url_for_favicon = args.url.clone();
+    let favicon_handle  = tokio::spawn(async move {
+        cover::fetch_favicon(&client_favicon, &url_for_favicon).await
+    });
+
+    // ── Run article+image pipeline concurrently with cover generation ─────────
+
+    let (pipeline_result, cover_png) = tokio::join!(
+
+        // ── Arm A: per-article scrape → per-article image download ────────────
+        {
+            // Capture everything the pipeline arm needs; the cover arm is independent.
+            let client          = client.clone();
+            let host_times      = host_times.clone();
+            let image_sem       = image_sem.clone();
+            let seen_sha1s      = seen_sha1s.clone();
+            let sanitizer       = sanitizer.clone();
+            let article_pb      = article_pb.clone();
+            let image_pb        = image_pb.clone();
+            let article_fetched = article_fetched.clone();
+            let img_fetched     = img_fetched.clone();
+            let img_hits        = img_hits.clone();
+            let no_images       = args.no_images;
+            let max_w           = args.max_image_width;
+            async move {
+                let results: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> =
+                    futures::stream::iter(to_fetch)
+                        // Pre-clone everything the per-item closure captures once;
+                        // the move closure keeps these in its environment and
+                        // clones them cheaply per item.
+                        .map({
+                            let client          = client.clone();
+                            let host_times      = host_times.clone();
+                            let image_sem       = image_sem.clone();
+                            let seen_sha1s      = seen_sha1s.clone();
+                            let sanitizer       = sanitizer.clone();
+                            let article_pb      = article_pb.clone();
+                            let image_pb        = image_pb.clone();
+                            let article_fetched = article_fetched.clone();
+                            let img_fetched     = img_fetched.clone();
+                            let img_hits        = img_hits.clone();
+                            move |item| {
+                                let client          = client.clone();
+                                let host_times      = host_times.clone();
+                                let image_sem       = image_sem.clone();
+                                let seen_sha1s      = seen_sha1s.clone();
+                                let sanitizer       = sanitizer.clone();
+                                let article_pb      = article_pb.clone();
+                                let image_pb        = image_pb.clone();
+                                let article_fetched = article_fetched.clone();
+                                let img_fetched     = img_fetched.clone();
+                                let img_hits        = img_hits.clone();
+                                async move {
+                                    let maybe_article = scraper::scrape_article(
+                                        &client, item, sanitizer, &host_times,
+                                    ).await;
+
+                                    // Update article progress bar
+                                    article_pb.inc(1);
+                                    let fetched = article_fetched.fetch_add(1, Ordering::Relaxed) + 1;
+                                    article_pb.set_message(format!(
+                                        "{}  {}",
+                                        style(format!("{} cached", cached_count)).dim(),
+                                        style(format!("{} fetched", fetched)).cyan(),
+                                    ));
+
+                                    let article = maybe_article?;
+
+                                    // ── Per-article image pipeline ────────────
+                                    let article_images = if no_images || article.html.is_none() {
+                                        vec![]
+                                    } else {
+                                        let img_urls = images::extract_image_urls(
+                                            article.html.as_deref().unwrap_or(""),
+                                            &article.url,
+                                        );
+
+                                        // Partition into already-seen (cache hit) vs new
+                                        let (hit_count, to_download) = {
+                                            let mut seen = seen_sha1s.lock().await;
+                                            let mut hits = 0u64;
+                                            let mut new_urls = Vec::new();
+                                            for pair in img_urls {
+                                                if seen.insert(images::url_sha1(&pair.1)) {
+                                                    new_urls.push(pair);
+                                                } else {
+                                                    hits += 1;
+                                                }
+                                            }
+                                            (hits, new_urls)
+                                        };
+
+                                        if hit_count > 0 {
+                                            let prev = img_hits.fetch_add(hit_count, Ordering::Relaxed);
+                                            if let Some(ref pb) = image_pb {
+                                                let total_hits    = prev + hit_count;
+                                                let total_fetched = img_fetched.load(Ordering::Relaxed);
+                                                pb.set_message(format!(
+                                                    "{}  {}",
+                                                    style(format!("{} cached", total_hits)).dim(),
+                                                    style(format!("{} fetched", total_fetched)).cyan(),
+                                                ));
+                                            }
+                                        }
+                                        if !to_download.is_empty() {
+                                            if let Some(ref pb) = image_pb {
+                                                pb.inc_length(to_download.len() as u64);
+                                            }
+                                        }
+
+                                        futures::stream::iter(to_download)
+                                            .map({
+                                                let client     = client.clone();
+                                                let host_times = host_times.clone();
+                                                let image_sem  = image_sem.clone();
+                                                let image_pb   = image_pb.clone();
+                                                let img_fetched = img_fetched.clone();
+                                                let img_hits    = img_hits.clone();
+                                                move |(raw_src, abs_url)| {
+                                                    let client      = client.clone();
+                                                    let host_times  = host_times.clone();
+                                                    let image_sem   = image_sem.clone();
+                                                    let image_pb    = image_pb.clone();
+                                                    let img_fetched = img_fetched.clone();
+                                                    let img_hits    = img_hits.clone();
+                                                    async move {
+                                                        let result = images::download_image(
+                                                            &client, raw_src, abs_url,
+                                                            max_w, &host_times, &image_sem,
+                                                        ).await;
+                                                        if let Some(ref pb) = image_pb {
+                                                            pb.inc(1);
+                                                            let total_fetched = img_fetched.fetch_add(1, Ordering::Relaxed) + 1;
+                                                            let total_hits    = img_hits.load(Ordering::Relaxed);
+                                                            pb.set_message(format!(
+                                                                "{}  {}",
+                                                                style(format!("{} cached", total_hits)).dim(),
+                                                                style(format!("{} fetched", total_fetched)).cyan(),
+                                                            ));
+                                                        }
+                                                        result
+                                                    }
+                                                }
+                                            })
+                                            .buffer_unordered(4)
+                                            .filter_map(|r| async move { r })
+                                            .collect::<Vec<_>>()
+                                            .await
+                                    };
+
+                                    Some((article, article_images))
+                                }
+                            }
+                        })
+                        .buffer_unordered(5)
+                        .filter_map(|r| async move { r })
+                        .collect::<Vec<_>>()
+                        .await;
+
+                article_pb.finish();
+                if let Some(ref pb) = image_pb {
+                    pb.finish();
+                }
+                results
+            }
+        },
+
+        // ── Arm B: favicon fetch + cover generation ───────────────────────────
+        {
+            let cover_sp     = cover_sp.clone();
+            let domain_title = domain_title.clone();
+            async move {
+                cover_sp.enable_steady_tick(Duration::from_millis(100));
+                cover_sp.set_message("Fetching favicon...");
+
+                let favicon = favicon_handle.await.ok().flatten();
+
+                cover_sp.set_message("Generating cover...");
+                let title_owned = domain_title;
+                let result = tokio::task::spawn_blocking(move || {
+                    cover::generate_cover(&title_owned, feed_date, favicon.as_deref())
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+
+                cover_sp.finish_with_message("Cover ready");
+                result
+            }
+        },
+    );
+
+    // ── Batch DB inserts (all on the main task — rusqlite is !Send) ───────────
+
+    for (article, article_images) in &pipeline_result {
+        for img in article_images {
+            cache::insert_image(&conn, img)?;
+        }
+        cache::insert_article(&conn, &args.url, article)?;
+    }
+
+    // ── Load from DB (respects --limit) ──────────────────────────────────────
+
     let all_articles = cache::load_articles(&conn, &args.url, args.limit)?;
 
     if all_articles.is_empty() {
@@ -92,7 +332,7 @@ async fn main() -> Result<(), AppError> {
         return Ok(());
     }
 
-    // Load images referenced by the articles that will go into the EPUB
+    // Collect the images referenced by the EPUB articles
     let epub_images: HashMap<String, images::ProcessedImage> = if args.no_images {
         HashMap::new()
     } else {
@@ -112,21 +352,23 @@ async fn main() -> Result<(), AppError> {
             .collect()
     };
 
-    // Generate cover image
-    let domain_title = cover::extract_domain_title(&args.url);
-    let favicon_bytes = cover::fetch_favicon(&client, &args.url).await;
-    let cover_png = match cover::generate_cover(&domain_title, feed_date, favicon_bytes.as_deref()) {
-        Ok(bytes) => Some(bytes),
-        Err(e) => {
-            eprintln!("Cover generation failed: {e}");
-            None
-        }
-    };
+    // ── Build EPUB ────────────────────────────────────────────────────────────
 
-    println!("Building EPUB with {} article(s)...", all_articles.len());
-    let output_path = epub::derive_output_path(&feed_title);
-    epub::build_epub(&feed_title, &all_articles, &epub_images, cover_png, &output_path)?;
-    println!("Written: {}", output_path.display());
+    epub_sp.enable_steady_tick(Duration::from_millis(100));
+    epub_sp.set_message(format!("Building EPUB ({} articles)...", all_articles.len()));
+
+    let output_path    = epub::derive_output_path(&feed_title);
+    let output_display = output_path.display().to_string();
+
+    let epub_result = tokio::task::spawn_blocking(move || {
+        epub::build_epub(&feed_title, &all_articles, &epub_images, cover_png, &output_path)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("EPUB task panicked: {e}")))?;
+
+    epub_result?;
+
+    epub_sp.finish_with_message(format!("Written: {}", output_display));
 
     Ok(())
 }

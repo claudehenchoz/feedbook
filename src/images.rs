@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::io::Cursor;
-use futures::StreamExt;
+use std::sync::Arc;
 use image::{DynamicImage, ImageFormat};
 use regex::Regex;
 use sha1::{Digest, Sha1};
+use tokio::sync::Semaphore;
+use crate::throttle::HostTimes;
 
 pub struct ProcessedImage {
     pub url_sha1:     String,
@@ -160,57 +162,49 @@ pub fn sanitize_data_attrs(html: &str) -> String {
     .into_owned()
 }
 
-/// Downloads and processes images that are not already in the cache.
-/// Returns only images that need to be inserted into the DB.
-pub async fn download_and_process(
+/// Downloads and processes a single image.
+///
+/// Acquires one permit from `sem` for the duration of the download and
+/// CPU processing, bounding total concurrent image work globally.
+/// Uses `throttled_get` to respect per-host rate limits.
+pub async fn download_image(
     client:    &reqwest::Client,
-    urls:      Vec<(String, String)>, // (raw_src, absolute_url)
+    raw_src:   String,
+    abs_url:   String,
     max_width: u32,
-) -> Vec<ProcessedImage> {
-    if urls.is_empty() {
-        return vec![];
-    }
+    times:     &HostTimes,
+    sem:       &Arc<Semaphore>,
+) -> Option<ProcessedImage> {
+    // Hold the permit for the full download + process cycle.
+    let _permit = sem.acquire().await.unwrap();
 
-    futures::stream::iter(urls)
-        .map(|(raw_src, abs_url)| {
-            let client = client.clone();
-            async move {
-                let bytes = match client.get(&abs_url).send().await {
-                    Err(e) => {
-                        eprintln!("Image fetch error ({}): {}", abs_url, e);
-                        return None;
-                    }
-                    Ok(resp) => match resp.bytes().await {
-                        Err(e) => {
-                            eprintln!("Image read error ({}): {}", abs_url, e);
-                            return None;
-                        }
-                        Ok(b) => b,
-                    },
-                };
-
-                let sha1 = url_sha1(&abs_url);
-                let abs_url_clone = abs_url.clone();
-
-                // CPU-intensive work: decode, resize, encode
-                let result = tokio::task::spawn_blocking(move || {
-                    process_image_bytes(bytes.to_vec(), &abs_url_clone, &sha1, max_width)
-                })
-                .await
-                .ok()
-                .and_then(|r| r);
-
-                if result.is_none() {
-                    // raw_src is unused if we return None, but suppress the warning
-                    let _ = raw_src;
-                }
-                result
+    let bytes = match crate::throttle::throttled_get(client, &abs_url, times).await {
+        Err(e) => {
+            eprintln!("Image fetch error ({}): {}", abs_url, e);
+            let _ = raw_src;
+            return None;
+        }
+        Ok(resp) => match resp.bytes().await {
+            Err(e) => {
+                eprintln!("Image read error ({}): {}", abs_url, e);
+                let _ = raw_src;
+                return None;
             }
-        })
-        .buffer_unordered(4)
-        .filter_map(|r| async move { r })
-        .collect::<Vec<_>>()
-        .await
+            Ok(b) => b,
+        },
+    };
+
+    let sha1 = url_sha1(&abs_url);
+    let abs_url_clone = abs_url.clone();
+    let _ = raw_src;
+
+    // CPU-intensive work: decode, resize, encode
+    tokio::task::spawn_blocking(move || {
+        process_image_bytes(bytes.to_vec(), &abs_url_clone, &sha1, max_width)
+    })
+    .await
+    .ok()
+    .and_then(|r| r)
 }
 
 fn is_svg(bytes: &[u8], url: &str) -> bool {

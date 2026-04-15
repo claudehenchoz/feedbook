@@ -636,6 +636,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "clap",
+ "console",
  "dirs",
  "dom_query",
  "dom_smoothie",
