@@ -24,6 +24,10 @@ hex = "0.4"
 url = "2"
 ab_glyph = "0.2"
 dom_query = "0.27.0"
+imagequant = "4"
+png = "0.18.1"
+oxipng = { version = "9", default-features = false, features = ["parallel"] }
+bytemuck = "1"
 
 [profile.release]
 opt-level = "z"
