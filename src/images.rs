@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use image::{DynamicImage, ImageFormat};
+use indicatif::ProgressBar;
 use regex::Regex;
 use sha1::{Digest, Sha1};
 use tokio::sync::Semaphore;
@@ -167,6 +168,10 @@ pub fn sanitize_data_attrs(html: &str) -> String {
 /// Acquires one permit from `sem` for the duration of the download and
 /// CPU processing, bounding total concurrent image work globally.
 /// Uses `throttled_get` to respect per-host rate limits.
+///
+/// `log_pb` must be a `ProgressBar` belonging to the active `MultiProgress`.
+/// Errors are routed through `log_pb.println()` so they appear above the bars
+/// without corrupting the cursor-tracking used for in-place updates.
 pub async fn download_image(
     client:    &reqwest::Client,
     raw_src:   String,
@@ -174,19 +179,20 @@ pub async fn download_image(
     max_width: u32,
     times:     &HostTimes,
     sem:       &Arc<Semaphore>,
+    log_pb:    ProgressBar,
 ) -> Option<ProcessedImage> {
     // Hold the permit for the full download + process cycle.
     let _permit = sem.acquire().await.unwrap();
 
     let bytes = match crate::throttle::throttled_get(client, &abs_url, times).await {
         Err(e) => {
-            eprintln!("Image fetch error ({}): {}", abs_url, e);
+            log_pb.println(format!("Image fetch error ({}): {}", abs_url, e));
             let _ = raw_src;
             return None;
         }
         Ok(resp) => match resp.bytes().await {
             Err(e) => {
-                eprintln!("Image read error ({}): {}", abs_url, e);
+                log_pb.println(format!("Image read error ({}): {}", abs_url, e));
                 let _ = raw_src;
                 return None;
             }
@@ -200,7 +206,7 @@ pub async fn download_image(
 
     // CPU-intensive work: decode, resize, encode
     tokio::task::spawn_blocking(move || {
-        process_image_bytes(bytes.to_vec(), &abs_url_clone, &sha1, max_width)
+        process_image_bytes(bytes.to_vec(), &abs_url_clone, &sha1, max_width, &log_pb)
     })
     .await
     .ok()
@@ -223,6 +229,7 @@ fn process_image_bytes(
     abs_url: &str,
     sha1: &str,
     max_width: u32,
+    log_pb: &ProgressBar,
 ) -> Option<ProcessedImage> {
     // Handle SVGs: store as-is without decode/resize
     if is_svg(&bytes, abs_url) {
@@ -239,7 +246,7 @@ fn process_image_bytes(
     let img = match image::load_from_memory(&bytes) {
         Ok(img) => img,
         Err(e) => {
-            eprintln!("Image decode error ({}): {}", abs_url, e);
+            log_pb.println(format!("Image decode error ({}): {}", abs_url, e));
             return None;
         }
     };
@@ -273,7 +280,7 @@ fn process_image_bytes(
 
     let mut buf = Vec::new();
     if let Err(e) = img.write_to(&mut Cursor::new(&mut buf), fmt) {
-        eprintln!("Image encode error ({}): {}", abs_url, e);
+        log_pb.println(format!("Image encode error ({}): {}", abs_url, e));
         return None;
     }
 

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use ammonia::Builder;
 use chrono::{DateTime, Utc};
 use dom_smoothie::Readability;
+use indicatif::ProgressBar;
 use crate::feed::FeedItem;
 use crate::sanitize::sanitize_html;
 use crate::throttle::HostTimes;
@@ -27,6 +28,10 @@ fn parse_date(s: &str) -> Option<DateTime<Utc>> {
 
 /// Fetches and parses a single feed item into a `ScrapedArticle`.
 ///
+/// `log_pb` is any `ProgressBar` belonging to the active `MultiProgress`;
+/// errors are routed through `log_pb.println()` so they appear above the bars
+/// without corrupting the cursor-tracking used for in-place updates.
+///
 /// Returns `None` only on HTTP error (the URL will not be cached and will be
 /// retried on the next run).  On Readability failure the article is still
 /// returned with `html: None` so the URL is cached and not re-fetched.
@@ -35,15 +40,16 @@ pub async fn scrape_article(
     item: FeedItem,
     sanitizer: Arc<Builder<'static>>,
     times: &HostTimes,
+    log_pb: ProgressBar,
 ) -> Option<ScrapedArticle> {
     let html = match crate::throttle::throttled_get(client, &item.url, times).await {
         Err(e) => {
-            eprintln!("HTTP fetch error ({}): {}", item.url, e);
+            log_pb.println(format!("HTTP fetch error ({}): {}", item.url, e));
             return None;
         }
         Ok(resp) => match resp.text().await {
             Err(e) => {
-                eprintln!("HTTP read error ({}): {}", item.url, e);
+                log_pb.println(format!("HTTP read error ({}): {}", item.url, e));
                 return None;
             }
             Ok(h) => h,
@@ -75,7 +81,9 @@ pub async fn scrape_article(
             html: Some(sanitize_html(&sanitizer, &content)),
         },
         None => {
-            eprintln!("Readability failed ({}), caching with no content", item.url);
+            log_pb.println(format!(
+                "Readability failed ({}), caching with no content", item.url
+            ));
             ScrapedArticle {
                 url: item.url,
                 title: item.title,

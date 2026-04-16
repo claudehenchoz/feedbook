@@ -70,13 +70,26 @@ async fn main() -> Result<(), AppError> {
     let seen_sha1s = Arc::new(Mutex::new(cached_sha1s));
 
     // Live counters for progress bar messages
-    let article_fetched  = Arc::new(AtomicU64::new(0));
-    let img_fetched      = Arc::new(AtomicU64::new(0));
-    let img_hits         = Arc::new(AtomicU64::new(0));
+    let article_fetched = Arc::new(AtomicU64::new(0));
+    let img_fetched     = Arc::new(AtomicU64::new(0));
+    let img_hits        = Arc::new(AtomicU64::new(0));
 
     // ── MultiProgress bars ────────────────────────────────────────────────────
-
-    let mp = MultiProgress::new();
+    //
+    // IMPORTANT — only add bars that immediately have content.  Adding empty
+    // spinners upfront causes a line-count mismatch: MultiProgress thinks it
+    // drew N lines but the terminal only shows M < N visible lines, so the
+    // next cursor-up overshoots and bars scroll instead of update in-place.
+    //
+    // Cover and EPUB spinners are added lazily below (inside join! arm B and
+    // after the join! completes).
+    //
+    // Cap the draw rate so bursts of concurrent inc()/set_message() calls from
+    // many async tasks don't race to the terminal faster than it can process
+    // cursor-up escape codes.
+    let mp = MultiProgress::with_draw_target(
+        indicatif::ProgressDrawTarget::stderr_with_hz(8),
+    );
 
     let article_pb = mp.add(ProgressBar::new(feed_item_count as u64));
     article_pb.set_style(
@@ -108,16 +121,6 @@ async fn main() -> Result<(), AppError> {
         Some(pb)
     };
 
-    let cover_sp = mp.add(ProgressBar::new_spinner());
-    cover_sp.set_style(
-        ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap()
-    );
-
-    let epub_sp = mp.add(ProgressBar::new_spinner());
-    epub_sp.set_style(
-        ProgressStyle::with_template("{spinner:.green} {msg}").unwrap()
-    );
-
     // ── Start favicon fetch immediately (only needs the feed URL) ─────────────
 
     let domain_title    = cover::extract_domain_title(&args.url);
@@ -133,7 +136,6 @@ async fn main() -> Result<(), AppError> {
 
         // ── Arm A: per-article scrape → per-article image download ────────────
         {
-            // Capture everything the pipeline arm needs; the cover arm is independent.
             let client          = client.clone();
             let host_times      = host_times.clone();
             let image_sem       = image_sem.clone();
@@ -149,9 +151,6 @@ async fn main() -> Result<(), AppError> {
             async move {
                 let results: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> =
                     futures::stream::iter(to_fetch)
-                        // Pre-clone everything the per-item closure captures once;
-                        // the move closure keeps these in its environment and
-                        // clones them cheaply per item.
                         .map({
                             let client          = client.clone();
                             let host_times      = host_times.clone();
@@ -175,8 +174,14 @@ async fn main() -> Result<(), AppError> {
                                 let img_fetched     = img_fetched.clone();
                                 let img_hits        = img_hits.clone();
                                 async move {
+                                    // Use article_pb as the log sink for this task.
+                                    // ProgressBar::println() suspends the bars, prints
+                                    // the line above them, then re-renders — preventing
+                                    // the cursor-tracking corruption caused by eprintln!.
+                                    let log_pb = article_pb.clone();
+
                                     let maybe_article = scraper::scrape_article(
-                                        &client, item, sanitizer, &host_times,
+                                        &client, item, sanitizer, &host_times, log_pb.clone(),
                                     ).await;
 
                                     // Update article progress bar
@@ -234,12 +239,13 @@ async fn main() -> Result<(), AppError> {
 
                                         futures::stream::iter(to_download)
                                             .map({
-                                                let client     = client.clone();
-                                                let host_times = host_times.clone();
-                                                let image_sem  = image_sem.clone();
-                                                let image_pb   = image_pb.clone();
+                                                let client      = client.clone();
+                                                let host_times  = host_times.clone();
+                                                let image_sem   = image_sem.clone();
+                                                let image_pb    = image_pb.clone();
                                                 let img_fetched = img_fetched.clone();
                                                 let img_hits    = img_hits.clone();
+                                                let log_pb      = log_pb.clone();
                                                 move |(raw_src, abs_url)| {
                                                     let client      = client.clone();
                                                     let host_times  = host_times.clone();
@@ -247,10 +253,12 @@ async fn main() -> Result<(), AppError> {
                                                     let image_pb    = image_pb.clone();
                                                     let img_fetched = img_fetched.clone();
                                                     let img_hits    = img_hits.clone();
+                                                    let log_pb      = log_pb.clone();
                                                     async move {
                                                         let result = images::download_image(
                                                             &client, raw_src, abs_url,
                                                             max_w, &host_times, &image_sem,
+                                                            log_pb,
                                                         ).await;
                                                         if let Some(ref pb) = image_pb {
                                                             pb.inc(1);
@@ -290,11 +298,24 @@ async fn main() -> Result<(), AppError> {
         },
 
         // ── Arm B: favicon fetch + cover generation ───────────────────────────
+        //
+        // The cover spinner is added to MultiProgress HERE (lazily) rather than
+        // upfront.  Adding it upfront would put an empty spinner line in the
+        // initial render, inflating the line count and causing cursor-up to
+        // overshoot on the next draw.
+        //
+        // enable_steady_tick is intentionally NOT used: it spawns a std::thread
+        // that races with the tokio tasks at the draw-rate-limiter check (a
+        // TOCTOU on the "time since last draw" timestamp), causing duplicate
+        // draws that make bars scroll instead of update in-place.
         {
-            let cover_sp     = cover_sp.clone();
+            let mp_cover     = mp.clone();
             let domain_title = domain_title.clone();
             async move {
-                cover_sp.enable_steady_tick(Duration::from_millis(100));
+                let cover_sp = mp_cover.add(ProgressBar::new_spinner());
+                cover_sp.set_style(
+                    ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap()
+                );
                 cover_sp.set_message("Fetching favicon...");
 
                 let favicon = favicon_handle.await.ok().flatten();
@@ -353,8 +374,14 @@ async fn main() -> Result<(), AppError> {
     };
 
     // ── Build EPUB ────────────────────────────────────────────────────────────
+    //
+    // EPUB spinner is also added lazily here, after the pipeline finishes,
+    // for the same reason as the cover spinner above.
 
-    epub_sp.enable_steady_tick(Duration::from_millis(100));
+    let epub_sp = mp.add(ProgressBar::new_spinner());
+    epub_sp.set_style(
+        ProgressStyle::with_template("{spinner:.green} {msg}").unwrap()
+    );
     epub_sp.set_message(format!("Building EPUB ({} articles)...", all_articles.len()));
 
     let output_path    = epub::derive_output_path(&feed_title);
