@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-const THROTTLE_MS: u64 = 100;
+const THROTTLE_MS: u64 = 1000;
 
 /// Shared map of hostname → time of the last request to that host.
 pub type HostTimes = Arc<Mutex<HashMap<String, Instant>>>;
