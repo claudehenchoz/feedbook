@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use rbook::epub::{Epub, EpubChapter};
 use crate::error::AppError;
@@ -62,10 +63,8 @@ fn inject_kobo_spans(xhtml: &str, chapter: usize) -> String {
             None => {
                 let text = &xhtml[pos..];
                 if !in_head && !text.trim().is_empty() {
-                    out.push_str(&format!(
-                        r#"<span class="koboSpan" id="kobo.{}.{}">{}</span>"#,
-                        chapter, segment, text
-                    ));
+                    write!(out, r#"<span class="koboSpan" id="kobo.{}.{}">{}</span>"#,
+                        chapter, segment, text).unwrap();
                 } else {
                     out.push_str(text);
                 }
@@ -77,10 +76,8 @@ fn inject_kobo_spans(xhtml: &str, chapter: usize) -> String {
         // Emit text node before this tag
         let text = &xhtml[pos..tag_start];
         if !in_head && !text.trim().is_empty() {
-            out.push_str(&format!(
-                r#"<span class="koboSpan" id="kobo.{}.{}">{}</span>"#,
-                chapter, segment, text
-            ));
+            write!(out, r#"<span class="koboSpan" id="kobo.{}.{}">{}</span>"#,
+                chapter, segment, text).unwrap();
             segment += 1;
         } else {
             out.push_str(text);

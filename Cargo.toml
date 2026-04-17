@@ -31,7 +31,7 @@ oxipng = { version = "9", default-features = false, features = ["parallel"] }
 bytemuck = "1"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = "symbols"

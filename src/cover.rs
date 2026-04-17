@@ -370,7 +370,7 @@ fn encode_png_optimized(img: &RgbaImage) -> Result<Vec<u8>, AppError> {
     }
 
     // --- Step 3: Post-process with oxipng ---
-    let opts = oxipng::Options::from_preset(6); // 0=fast, 6=max
+    let opts = oxipng::Options::from_preset(2); // 0=fast, 6=max; 2 is ~10x faster for ~3% size penalty
     let optimized = oxipng::optimize_from_memory(&png_buf, &opts)
         .map_err(|e| AppError::Other(format!("oxipng: {e}")))?;
 
@@ -445,7 +445,7 @@ fn render_stamp(fav: &RgbaImage, cell_w: u32, cell_h: u32) -> Vec<(f32, f32, f32
     let in_cx = fav_w / 2.0;
     let in_cy = fav_h / 2.0;
 
-    let ss_offsets = [(-0.25f32, -0.25f32), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)];
+    let ss_offsets = [(-0.25f32, -0.25f32), (0.25, 0.25)]; // 2x supersampling (was 4x)
     let opacity = 0.5;
 
     let mut stamp = vec![(0.0f32, 0.0f32, 0.0f32, 0.0f32); (cell_w * cell_h) as usize];
@@ -473,35 +473,33 @@ fn render_stamp(fav: &RgbaImage, cell_w: u32, cell_h: u32) -> Vec<(f32, f32, f32
                 }
             }
 
-            let final_a = a_acc / 4.0;
-            stamp[(py * cell_w + px) as usize] = (r_acc / 4.0, g_acc / 4.0, b_acc / 4.0, final_a);
+            let final_a = a_acc / 2.0;
+            stamp[(py * cell_w + px) as usize] = (r_acc / 2.0, g_acc / 2.0, b_acc / 2.0, final_a);
         }
     }
 
     stamp
 }
 
-/// Improved Bilinear sampler with safety checks
 fn get_pixel_bilinear(img: &RgbaImage, x: f32, y: f32) -> Rgba<u8> {
-    let width = img.width();
-    let height = img.height();
+    let w = img.width() as usize;
+    let h = img.height() as usize;
+    let raw = img.as_raw();
 
-    let x1 = (x.floor() as u32).min(width - 1);
-    let y1 = (y.floor() as u32).min(height - 1);
-    let x2 = (x1 + 1).min(width - 1);
-    let y2 = (y1 + 1).min(height - 1);
+    let x1 = (x.floor() as usize).min(w - 1);
+    let y1 = (y.floor() as usize).min(h - 1);
+    let x2 = (x1 + 1).min(w - 1);
+    let y2 = (y1 + 1).min(h - 1);
 
     let fx = x - x.floor();
     let fy = y - y.floor();
 
-    let p11 = img.get_pixel(x1, y1);
-    let p21 = img.get_pixel(x2, y1);
-    let p12 = img.get_pixel(x1, y2);
-    let p22 = img.get_pixel(x2, y2);
+    let p = |xi: usize, yi: usize| &raw[yi * w * 4 + xi * 4..][..4];
+    let (p11, p21, p12, p22) = (p(x1, y1), p(x2, y1), p(x1, y2), p(x2, y2));
 
     let mut res = [0u8; 4];
     for i in 0..4 {
-        let top = p11[i] as f32 * (1.0 - fx) + p21[i] as f32 * fx;
+        let top    = p11[i] as f32 * (1.0 - fx) + p21[i] as f32 * fx;
         let bottom = p12[i] as f32 * (1.0 - fx) + p22[i] as f32 * fx;
         res[i] = (top * (1.0 - fy) + bottom * fy).round() as u8;
     }

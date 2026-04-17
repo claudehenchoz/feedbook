@@ -262,11 +262,30 @@ fn process_image_bytes(
         img.into_rgb8().into()
     };
 
+    // If already within max_width and a passthrough-safe format, skip re-encoding
+    if img.width() <= max_width {
+        if let Ok(fmt) = image::guess_format(&bytes) {
+            let ext = match fmt {
+                ImageFormat::Jpeg => Some("jpeg"),
+                ImageFormat::Png  => Some("png"),
+                _ => None,
+            };
+            if let Some(ext) = ext {
+                return Some(ProcessedImage {
+                    url_sha1:     sha1.to_string(),
+                    original_url: abs_url.to_string(),
+                    filename:     format!("images/{}.{}", sha1, ext),
+                    data:         bytes,
+                });
+            }
+        }
+    }
+
     // Resize if wider than max_width
     let img = if img.width() > max_width {
         let new_w = max_width;
         let new_h = ((img.height() as f64 * max_width as f64 / img.width() as f64) as u32).max(1);
-        img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+        img.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle)
     } else {
         img
     };

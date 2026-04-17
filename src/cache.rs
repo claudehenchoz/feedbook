@@ -18,7 +18,9 @@ pub fn db_path() -> Result<PathBuf, AppError> {
 pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS articles (
+        "PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=NORMAL;
+        CREATE TABLE IF NOT EXISTS articles (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             feed_url    TEXT    NOT NULL,
             article_url TEXT    NOT NULL UNIQUE,
@@ -37,7 +39,12 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
             data       BLOB    NOT NULL,
             fetched_at INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_images_fetched_at ON images(fetched_at);",
+        CREATE INDEX IF NOT EXISTS idx_images_fetched_at ON images(fetched_at);
+        CREATE TABLE IF NOT EXISTS covers (
+            cache_key  TEXT    PRIMARY KEY,
+            data       BLOB    NOT NULL,
+            created_at INTEGER NOT NULL
+        );",
     )?;
     Ok(conn)
 }
@@ -56,6 +63,10 @@ pub fn prune(conn: &Connection, feed_url: &str) -> Result<(), AppError> {
     )?;
     conn.execute(
         "DELETE FROM articles WHERE fetched_at < (strftime('%s', 'now') - 7776000)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM covers WHERE created_at < (strftime('%s', 'now') - 2592000)",
         [],
     )?;
     Ok(())
@@ -180,4 +191,23 @@ pub fn load_images(conn: &Connection, sha1s: &[String]) -> Result<Vec<ProcessedI
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(images)
+}
+
+pub fn get_cached_cover(conn: &Connection, key: &str) -> Result<Option<Vec<u8>>, AppError> {
+    let mut stmt = conn.prepare("SELECT data FROM covers WHERE cache_key = ?1")?;
+    let mut rows = stmt.query(params![key])?;
+    if let Some(row) = rows.next()? {
+        let data: Vec<u8> = row.get(0)?;
+        return Ok(Some(data));
+    }
+    Ok(None)
+}
+
+pub fn store_cover(conn: &Connection, key: &str, data: &[u8]) -> Result<(), AppError> {
+    let created_at = Utc::now().timestamp();
+    conn.execute(
+        "INSERT OR REPLACE INTO covers (cache_key, data, created_at) VALUES (?1, ?2, ?3)",
+        params![key, data, created_at],
+    )?;
+    Ok(())
 }

@@ -40,7 +40,7 @@ async fn main() -> Result<(), AppError> {
             if p.is_dir() { p.join("feedbook.sql") } else { p }
         }
     };
-    let conn = cache::open_db(&db_path)?;
+    let mut conn = cache::open_db(&db_path)?;
     cache::prune(&conn, &args.url)?;
     cache::prune_images(&conn)?;
     let cached_urls: HashSet<String> = cache::get_cached_urls(&conn, &args.url)?;
@@ -69,7 +69,7 @@ async fn main() -> Result<(), AppError> {
 
     let host_times = throttle::new_host_times();
     // Global cap on concurrent image downloads + processing (per Semaphore permit)
-    let image_sem  = Arc::new(Semaphore::new(8));
+    let image_sem  = Arc::new(Semaphore::new(if args.kobo { 3 } else { 8 }));
     let sanitizer  = sanitize::build_sanitizer();
 
     // Image SHA1 dedup: start with what is already in the DB
@@ -138,6 +138,16 @@ async fn main() -> Result<(), AppError> {
     });
 
     // ── Run article+image pipeline concurrently with cover generation ─────────
+
+    // On single-core ARM (Kobo), lower concurrency avoids cache thrashing
+    let img_concurrency     = if args.kobo { 2usize } else { 4 };
+    let article_concurrency = if args.kobo { 2usize } else { 5 };
+
+    // Cover caching: skip expensive generation if feed+date hasn't changed
+    let cover_key = format!("{}|{}", args.url,
+        feed_date.map(|d| d.to_rfc3339()).unwrap_or_default());
+    let cover_from_cache = cache::get_cached_cover(&conn, &cover_key)?;
+    let had_cached_cover = cover_from_cache.is_some();
 
     let (pipeline_result, cover_png) = tokio::join!(
 
@@ -289,7 +299,7 @@ async fn main() -> Result<(), AppError> {
                                                     }
                                                 }
                                             })
-                                            .buffer_unordered(4)
+                                            .buffer_unordered(img_concurrency)
                                             .filter_map(|r| async move { r })
                                             .collect::<Vec<_>>()
                                             .await
@@ -299,7 +309,7 @@ async fn main() -> Result<(), AppError> {
                                 }
                             }
                         })
-                        .buffer_unordered(5)
+                        .buffer_unordered(article_concurrency)
                         .filter_map(|r| async move { r })
                         .collect::<Vec<_>>()
                         .await;
@@ -329,6 +339,12 @@ async fn main() -> Result<(), AppError> {
                     sp
                 });
 
+                if let Some(cached) = cover_from_cache {
+                    if let Some(sp) = cover_sp { sp.finish_with_message("Cover cached"); }
+                    else if stdout { eprintln!("Cover cached"); }
+                    return Some(cached);
+                }
+
                 let favicon = favicon_handle.await.ok().flatten();
 
                 if let Some(ref sp) = cover_sp {
@@ -354,14 +370,24 @@ async fn main() -> Result<(), AppError> {
         },
     );
 
+    // ── Store newly generated cover in cache ──────────────────────────────────
+
+    if !had_cached_cover {
+        if let Some(ref png) = cover_png {
+            let _ = cache::store_cover(&conn, &cover_key, png);
+        }
+    }
+
     // ── Batch DB inserts (all on the main task — rusqlite is !Send) ───────────
 
+    let tx = conn.transaction()?;
     for (article, article_images) in &pipeline_result {
         for img in article_images {
-            cache::insert_image(&conn, img)?;
+            cache::insert_image(&*tx, img)?;
         }
-        cache::insert_article(&conn, &args.url, article)?;
+        cache::insert_article(&*tx, &args.url, article)?;
     }
+    tx.commit()?;
 
     // ── Load from DB (respects --limit) ──────────────────────────────────────
 
