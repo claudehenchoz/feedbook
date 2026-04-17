@@ -31,7 +31,7 @@ p.article-meta {
 }
 "#;
 
-pub fn derive_output_path(feed_title: &str) -> PathBuf {
+pub fn derive_output_path(feed_title: &str, kobo: bool) -> PathBuf {
     let slug: String = feed_title
         .to_lowercase()
         .chars()
@@ -46,7 +46,101 @@ pub fn derive_output_path(feed_title: &str) -> PathBuf {
     } else {
         slug
     };
-    PathBuf::from(format!("{}.epub", slug))
+    let ext = if kobo { "kepub.epub" } else { "epub" };
+    PathBuf::from(format!("{}.{}", slug, ext))
+}
+
+fn inject_kobo_spans(xhtml: &str, chapter: usize) -> String {
+    let mut out = String::with_capacity((xhtml.len() as f64 * 1.3) as usize);
+    let mut segment: usize = 1;
+    let mut in_head = false;
+    let mut pos = 0;
+
+    while pos < xhtml.len() {
+        // Find next '<'
+        let tag_start = match xhtml[pos..].find('<') {
+            None => {
+                let text = &xhtml[pos..];
+                if !in_head && !text.trim().is_empty() {
+                    out.push_str(&format!(
+                        r#"<span class="koboSpan" id="kobo.{}.{}">{}</span>"#,
+                        chapter, segment, text
+                    ));
+                } else {
+                    out.push_str(text);
+                }
+                break;
+            }
+            Some(rel) => pos + rel,
+        };
+
+        // Emit text node before this tag
+        let text = &xhtml[pos..tag_start];
+        if !in_head && !text.trim().is_empty() {
+            out.push_str(&format!(
+                r#"<span class="koboSpan" id="kobo.{}.{}">{}</span>"#,
+                chapter, segment, text
+            ));
+            segment += 1;
+        } else {
+            out.push_str(text);
+        }
+
+        // Find end of tag (quote-aware, handles <!-- and <?)
+        let tag_end = find_tag_end(xhtml, tag_start);
+        let tag = &xhtml[tag_start..=tag_end];
+        out.push_str(tag);
+
+        // Update in_head state based on tag name
+        let tag_inner = tag.trim_start_matches('<').trim_end_matches('>').trim();
+        let tag_name_lower = tag_inner
+            .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        if tag_name_lower == "head" {
+            in_head = true;
+        } else if tag_name_lower == "/head" {
+            in_head = false;
+        }
+
+        pos = tag_end + 1;
+    }
+
+    out
+}
+
+fn find_tag_end(xhtml: &str, tag_start: usize) -> usize {
+    let rest = &xhtml[tag_start..];
+    // Comments
+    if rest.starts_with("<!--") {
+        if let Some(rel) = rest[4..].find("-->") {
+            return tag_start + 4 + rel + 2; // index of '>' in "-->"
+        }
+        return xhtml.len() - 1;
+    }
+    // Processing instructions
+    if rest.starts_with("<?") {
+        if let Some(rel) = rest[2..].find("?>") {
+            return tag_start + 2 + rel + 1; // index of '>' in "?>"
+        }
+        return xhtml.len() - 1;
+    }
+    // Normal tag: scan quote-aware
+    let bytes = rest.as_bytes();
+    let mut i = 1usize;
+    let mut in_double = false;
+    let mut in_single = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if !in_single => in_double = !in_double,
+            b'\'' if !in_double => in_single = !in_single,
+            b'>' if !in_double && !in_single => return tag_start + i,
+            _ => {}
+        }
+        i += 1;
+    }
+    xhtml.len() - 1
 }
 
 fn escape_html(s: &str) -> String {
@@ -59,6 +153,8 @@ fn escape_html(s: &str) -> String {
 fn build_chapter_xhtml(
     article: &ScrapedArticle,
     epub_images: &HashMap<String, ProcessedImage>,
+    chapter_num: usize,
+    kobo: bool,
 ) -> String {
     let title = article.title.as_deref().unwrap_or("Untitled");
     let author = article.author.as_deref().unwrap_or("Unknown");
@@ -90,7 +186,7 @@ fn build_chapter_xhtml(
         }
     };
 
-    format!(
+    let xhtml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
@@ -114,7 +210,8 @@ fn build_chapter_xhtml(
         url = escape_html(&article.url),
         url_text = escape_html(&article.url),
         html_body = html_body,
-    )
+    );
+    if kobo { inject_kobo_spans(&xhtml, chapter_num) } else { xhtml }
 }
 
 pub fn build_epub(
@@ -123,11 +220,13 @@ pub fn build_epub(
     epub_images: &HashMap<String, ProcessedImage>,
     cover_png:   Option<Vec<u8>>,
     output_path: &PathBuf,
+    kobo:        bool,
 ) -> Result<(), AppError> {
     let article_chapters: Vec<EpubChapter> = articles
         .iter()
-        .map(|article| {
-            let xhtml = build_chapter_xhtml(article, epub_images);
+        .enumerate()
+        .map(|(i, article)| {
+            let xhtml = build_chapter_xhtml(article, epub_images, i + 1, kobo);
             let title = article.title.as_deref().unwrap_or("Untitled");
             EpubChapter::new(title).xhtml(xhtml)
         })

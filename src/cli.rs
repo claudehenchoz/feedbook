@@ -22,4 +22,20 @@ pub struct Args {
     /// Maximum image width in pixels
     #[arg(long, default_value_t = 460)]
     pub max_image_width: u32,
+
+    /// Path to the SQLite database file or directory (default: system local-data dir)
+    #[arg(long)]
+    pub dbpath: Option<String>,
+
+    /// Print plain log lines instead of progress bars (for CI/CD)
+    #[arg(long)]
+    pub stdout: bool,
+
+    /// Produce Kobo KEPUB (.kepub.epub) instead of standard EPUB
+    #[arg(long)]
+    pub kobo: bool,
+
+    /// Directory where the output EPUB/KEPUB should be written (default: current dir)
+    #[arg(long)]
+    pub outfolder: Option<String>,
 }

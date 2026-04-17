@@ -5,6 +5,7 @@ mod epub;
 mod error;
 mod feed;
 mod images;
+mod log;
 mod sanitize;
 mod scraper;
 mod throttle;
@@ -19,6 +20,7 @@ use console::style;
 use error::AppError;
 use futures::StreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use log::LogSink;
 use tokio::sync::{Mutex, Semaphore};
 
 #[tokio::main]
@@ -31,7 +33,13 @@ async fn main() -> Result<(), AppError> {
         .build()?;
 
     // Open DB, prune stale entries, get already-cached URLs
-    let db_path = cache::db_path()?;
+    let db_path = match &args.dbpath {
+        None => cache::db_path()?,
+        Some(p) => {
+            let p = std::path::PathBuf::from(p);
+            if p.is_dir() { p.join("feedbook.sql") } else { p }
+        }
+    };
     let conn = cache::open_db(&db_path)?;
     cache::prune(&conn, &args.url)?;
     cache::prune_images(&conn)?;
@@ -41,6 +49,9 @@ async fn main() -> Result<(), AppError> {
     let feed_data = feed::fetch_feed(&client, &args.url).await?;
     let feed_title = feed_data.title;
     let feed_date  = feed_data.date;
+    if args.stdout {
+        eprintln!("Feed: {}", feed_title);
+    }
     let mut feed_items = feed_data.items;
     if let Some(n) = args.limit {
         feed_items.truncate(n);
@@ -74,51 +85,47 @@ async fn main() -> Result<(), AppError> {
     let img_fetched     = Arc::new(AtomicU64::new(0));
     let img_hits        = Arc::new(AtomicU64::new(0));
 
-    // ── MultiProgress bars ────────────────────────────────────────────────────
-    //
-    // IMPORTANT — only add bars that immediately have content.  Adding empty
-    // spinners upfront causes a line-count mismatch: MultiProgress thinks it
-    // drew N lines but the terminal only shows M < N visible lines, so the
-    // next cursor-up overshoots and bars scroll instead of update in-place.
-    //
-    // Cover and EPUB spinners are added lazily below (inside join! arm B and
-    // after the join! completes).
-    //
-    // Cap the draw rate so bursts of concurrent inc()/set_message() calls from
-    // many async tasks don't race to the terminal faster than it can process
-    // cursor-up escape codes.
-    let mp = MultiProgress::with_draw_target(
-        indicatif::ProgressDrawTarget::stderr_with_hz(8),
-    );
+    // ── MultiProgress bars (skipped in --stdout mode) ─────────────────────────
+    let mp: Option<MultiProgress>;
+    let article_pb: Option<ProgressBar>;
+    let image_pb: Option<ProgressBar>;
 
-    let article_pb = mp.add(ProgressBar::new(feed_item_count as u64));
-    article_pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} articles  {msg}"
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
-    // Cached articles are already done — pre-fill them
-    if cached_count > 0 {
-        article_pb.inc(cached_count as u64);
-        article_pb.set_message(
-            style(format!("{} cached", cached_count)).dim().to_string()
-        );
-    }
-
-    let image_pb: Option<ProgressBar> = if args.no_images || to_fetch.is_empty() {
-        None
+    if args.stdout {
+        mp         = None;
+        article_pb = None;
+        image_pb   = None;
     } else {
-        let pb = mp.add(ProgressBar::new(0));
-        pb.set_style(
+        let m = MultiProgress::with_draw_target(
+            indicatif::ProgressDrawTarget::stderr_with_hz(8),
+        );
+        let apb = m.add(ProgressBar::new(feed_item_count as u64));
+        apb.set_style(
             ProgressStyle::with_template(
-                "{spinner:.cyan} [{bar:40.magenta/blue}] {pos}/{len} images  {msg}"
+                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} articles  {msg}"
             )
             .unwrap()
             .progress_chars("#>-"),
         );
-        Some(pb)
+        if cached_count > 0 {
+            apb.inc(cached_count as u64);
+            apb.set_message(style(format!("{} cached", cached_count)).dim().to_string());
+        }
+        let ipb: Option<ProgressBar> = if args.no_images || to_fetch.is_empty() {
+            None
+        } else {
+            let pb = m.add(ProgressBar::new(0));
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.cyan} [{bar:40.magenta/blue}] {pos}/{len} images  {msg}"
+                )
+                .unwrap()
+                .progress_chars("#>-"),
+            );
+            Some(pb)
+        };
+        mp         = Some(m);
+        article_pb = Some(apb);
+        image_pb   = ipb;
     };
 
     // ── Start favicon fetch immediately (only needs the feed URL) ─────────────
@@ -148,6 +155,7 @@ async fn main() -> Result<(), AppError> {
             let img_hits        = img_hits.clone();
             let no_images       = args.no_images;
             let max_w           = args.max_image_width;
+            let stdout          = args.stdout;
             async move {
                 let results: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> =
                     futures::stream::iter(to_fetch)
@@ -174,24 +182,31 @@ async fn main() -> Result<(), AppError> {
                                 let img_fetched     = img_fetched.clone();
                                 let img_hits        = img_hits.clone();
                                 async move {
-                                    // Use article_pb as the log sink for this task.
-                                    // ProgressBar::println() suspends the bars, prints
-                                    // the line above them, then re-renders — preventing
-                                    // the cursor-tracking corruption caused by eprintln!.
-                                    let log_pb = article_pb.clone();
+                                    let log = match article_pb.as_ref() {
+                                        Some(pb) => LogSink::Bar(pb.clone()),
+                                        None     => LogSink::Stderr,
+                                    };
 
+                                    let item_url = item.url.clone();
                                     let maybe_article = scraper::scrape_article(
-                                        &client, item, sanitizer, &host_times, log_pb.clone(),
+                                        &client, item, sanitizer, &host_times, log.clone(),
                                     ).await;
 
-                                    // Update article progress bar
-                                    article_pb.inc(1);
-                                    let fetched = article_fetched.fetch_add(1, Ordering::Relaxed) + 1;
-                                    article_pb.set_message(format!(
-                                        "{}  {}",
-                                        style(format!("{} cached", cached_count)).dim(),
-                                        style(format!("{} fetched", fetched)).cyan(),
-                                    ));
+                                    // Update article progress or log to stdout
+                                    if stdout {
+                                        let label = maybe_article.as_ref()
+                                            .and_then(|a| a.title.as_deref())
+                                            .unwrap_or(&item_url);
+                                        eprintln!("Article: {}", label);
+                                    } else if let Some(ref pb) = article_pb {
+                                        pb.inc(1);
+                                        let fetched = article_fetched.fetch_add(1, Ordering::Relaxed) + 1;
+                                        pb.set_message(format!(
+                                            "{}  {}",
+                                            style(format!("{} cached", cached_count)).dim(),
+                                            style(format!("{} fetched", fetched)).cyan(),
+                                        ));
+                                    }
 
                                     let article = maybe_article?;
 
@@ -245,7 +260,7 @@ async fn main() -> Result<(), AppError> {
                                                 let image_pb    = image_pb.clone();
                                                 let img_fetched = img_fetched.clone();
                                                 let img_hits    = img_hits.clone();
-                                                let log_pb      = log_pb.clone();
+                                                let log         = log.clone();
                                                 move |(raw_src, abs_url)| {
                                                     let client      = client.clone();
                                                     let host_times  = host_times.clone();
@@ -253,12 +268,12 @@ async fn main() -> Result<(), AppError> {
                                                     let image_pb    = image_pb.clone();
                                                     let img_fetched = img_fetched.clone();
                                                     let img_hits    = img_hits.clone();
-                                                    let log_pb      = log_pb.clone();
+                                                    let log         = log.clone();
                                                     async move {
                                                         let result = images::download_image(
                                                             &client, raw_src, abs_url,
                                                             max_w, &host_times, &image_sem,
-                                                            log_pb,
+                                                            log,
                                                         ).await;
                                                         if let Some(ref pb) = image_pb {
                                                             pb.inc(1);
@@ -289,7 +304,9 @@ async fn main() -> Result<(), AppError> {
                         .collect::<Vec<_>>()
                         .await;
 
-                article_pb.finish();
+                if let Some(ref pb) = article_pb {
+                    pb.finish();
+                }
                 if let Some(ref pb) = image_pb {
                     pb.finish();
                 }
@@ -298,29 +315,27 @@ async fn main() -> Result<(), AppError> {
         },
 
         // ── Arm B: favicon fetch + cover generation ───────────────────────────
-        //
-        // The cover spinner is added to MultiProgress HERE (lazily) rather than
-        // upfront.  Adding it upfront would put an empty spinner line in the
-        // initial render, inflating the line count and causing cursor-up to
-        // overshoot on the next draw.
-        //
-        // enable_steady_tick is intentionally NOT used: it spawns a std::thread
-        // that races with the tokio tasks at the draw-rate-limiter check (a
-        // TOCTOU on the "time since last draw" timestamp), causing duplicate
-        // draws that make bars scroll instead of update in-place.
         {
             let mp_cover     = mp.clone();
             let domain_title = domain_title.clone();
+            let stdout       = args.stdout;
             async move {
-                let cover_sp = mp_cover.add(ProgressBar::new_spinner());
-                cover_sp.set_style(
-                    ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap()
-                );
-                cover_sp.set_message("Fetching favicon...");
+                let cover_sp = mp_cover.as_ref().map(|m| {
+                    let sp = m.add(ProgressBar::new_spinner());
+                    sp.set_style(
+                        ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap()
+                    );
+                    sp.set_message("Fetching favicon...");
+                    sp
+                });
 
                 let favicon = favicon_handle.await.ok().flatten();
 
-                cover_sp.set_message("Generating cover...");
+                if let Some(ref sp) = cover_sp {
+                    sp.set_message("Generating cover...");
+                } else if stdout {
+                    eprintln!("Generating cover...");
+                }
                 let title_owned = domain_title;
                 let result = tokio::task::spawn_blocking(move || {
                     cover::generate_cover(&title_owned, feed_date, favicon.as_deref())
@@ -329,7 +344,11 @@ async fn main() -> Result<(), AppError> {
                 .ok()
                 .and_then(|r| r.ok());
 
-                cover_sp.finish_with_message("Cover ready");
+                if let Some(sp) = cover_sp {
+                    sp.finish_with_message("Cover ready");
+                } else if stdout {
+                    eprintln!("Cover ready");
+                }
                 result
             }
         },
@@ -373,29 +392,44 @@ async fn main() -> Result<(), AppError> {
             .collect()
     };
 
-    // ── Build EPUB ────────────────────────────────────────────────────────────
-    //
-    // EPUB spinner is also added lazily here, after the pipeline finishes,
-    // for the same reason as the cover spinner above.
+    // ── Build EPUB / KEPUB ────────────────────────────────────────────────────
 
-    let epub_sp = mp.add(ProgressBar::new_spinner());
-    epub_sp.set_style(
-        ProgressStyle::with_template("{spinner:.green} {msg}").unwrap()
-    );
-    epub_sp.set_message(format!("Building EPUB ({} articles)...", all_articles.len()));
+    let epub_sp = mp.as_ref().map(|m| {
+        let sp = m.add(ProgressBar::new_spinner());
+        sp.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
+        sp.set_message(format!("Building {} ({} articles)...",
+            if args.kobo { "KEPUB" } else { "EPUB" }, all_articles.len()));
+        sp
+    });
+    if epub_sp.is_none() && args.stdout {
+        eprintln!("Building {} ({} articles)...",
+            if args.kobo { "KEPUB" } else { "EPUB" }, all_articles.len());
+    }
 
-    let output_path    = epub::derive_output_path(&feed_title);
+    let output_path = epub::derive_output_path(&feed_title, args.kobo);
+    let output_path = if let Some(ref folder) = args.outfolder {
+        let dir = std::path::PathBuf::from(folder);
+        std::fs::create_dir_all(&dir)?;
+        dir.join(output_path)
+    } else {
+        output_path
+    };
     let output_display = output_path.display().to_string();
+    let kobo = args.kobo;
 
     let epub_result = tokio::task::spawn_blocking(move || {
-        epub::build_epub(&feed_title, &all_articles, &epub_images, cover_png, &output_path)
+        epub::build_epub(&feed_title, &all_articles, &epub_images, cover_png, &output_path, kobo)
     })
     .await
     .map_err(|e| AppError::Other(format!("EPUB task panicked: {e}")))?;
 
     epub_result?;
 
-    epub_sp.finish_with_message(format!("Written: {}", output_display));
+    if let Some(sp) = epub_sp {
+        sp.finish_with_message(format!("Written: {}", output_display));
+    } else {
+        eprintln!("Written: {}", output_display);
+    }
 
     Ok(())
 }

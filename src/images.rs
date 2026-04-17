@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use image::{DynamicImage, ImageFormat};
-use indicatif::ProgressBar;
 use regex::Regex;
 use sha1::{Digest, Sha1};
 use tokio::sync::Semaphore;
+use crate::log::LogSink;
 use crate::throttle::HostTimes;
 
 pub struct ProcessedImage {
@@ -179,20 +179,20 @@ pub async fn download_image(
     max_width: u32,
     times:     &HostTimes,
     sem:       &Arc<Semaphore>,
-    log_pb:    ProgressBar,
+    log:       LogSink,
 ) -> Option<ProcessedImage> {
     // Hold the permit for the full download + process cycle.
     let _permit = sem.acquire().await.unwrap();
 
     let bytes = match crate::throttle::throttled_get(client, &abs_url, times).await {
         Err(e) => {
-            log_pb.println(format!("Image fetch error ({}): {}", abs_url, e));
+            log.println(&format!("Image fetch error ({}): {}", abs_url, e));
             let _ = raw_src;
             return None;
         }
         Ok(resp) => match resp.bytes().await {
             Err(e) => {
-                log_pb.println(format!("Image read error ({}): {}", abs_url, e));
+                log.println(&format!("Image read error ({}): {}", abs_url, e));
                 let _ = raw_src;
                 return None;
             }
@@ -206,8 +206,9 @@ pub async fn download_image(
 
     // CPU-intensive work: decode, resize, encode
     tokio::task::spawn_blocking(move || {
-        process_image_bytes(bytes.to_vec(), &abs_url_clone, &sha1, max_width, &log_pb)
+        process_image_bytes(bytes.to_vec(), &abs_url_clone, &sha1, max_width, &log)
     })
+    // spawn_blocking requires Send; LogSink::Bar(ProgressBar) is Send
     .await
     .ok()
     .and_then(|r| r)
@@ -229,7 +230,7 @@ fn process_image_bytes(
     abs_url: &str,
     sha1: &str,
     max_width: u32,
-    log_pb: &ProgressBar,
+    log: &LogSink,
 ) -> Option<ProcessedImage> {
     // Handle SVGs: store as-is without decode/resize
     if is_svg(&bytes, abs_url) {
@@ -246,7 +247,7 @@ fn process_image_bytes(
     let img = match image::load_from_memory(&bytes) {
         Ok(img) => img,
         Err(e) => {
-            log_pb.println(format!("Image decode error ({}): {}", abs_url, e));
+            log.println(&format!("Image decode error ({}): {}", abs_url, e));
             return None;
         }
     };
@@ -280,7 +281,7 @@ fn process_image_bytes(
 
     let mut buf = Vec::new();
     if let Err(e) = img.write_to(&mut Cursor::new(&mut buf), fmt) {
-        log_pb.println(format!("Image encode error ({}): {}", abs_url, e));
+        log.println(&format!("Image encode error ({}): {}", abs_url, e));
         return None;
     }
 
