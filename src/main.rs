@@ -69,7 +69,7 @@ async fn main() -> Result<(), AppError> {
 
     let host_times = throttle::new_host_times();
     // Global cap on concurrent image downloads + processing (per Semaphore permit)
-    let image_sem  = Arc::new(Semaphore::new(if args.kobo { 3 } else { 8 }));
+    let image_sem  = Arc::new(Semaphore::new(if cfg!(all(target_arch = "arm", target_env = "musl")) { 3 } else { 8 }));
     let sanitizer  = sanitize::build_sanitizer();
 
     // Image SHA1 dedup: start with what is already in the DB
@@ -140,8 +140,8 @@ async fn main() -> Result<(), AppError> {
     // ── Run article+image pipeline concurrently with cover generation ─────────
 
     // On single-core ARM (Kobo), lower concurrency avoids cache thrashing
-    let img_concurrency     = if args.kobo { 2usize } else { 4 };
-    let article_concurrency = if args.kobo { 2usize } else { 5 };
+    let img_concurrency     = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 4 };
+    let article_concurrency = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 5 };
 
     // Cover caching: skip expensive generation if feed+date hasn't changed
     let cover_key = format!("{}|{}", args.url,
