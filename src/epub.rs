@@ -232,6 +232,7 @@ pub fn build_epub(
     let mut builder = Epub::builder()
         .identifier(feed_title)
         .title(feed_title)
+        .creator("Feedbook")
         .language("en")
         .resource(("stylesheet.css", STYLESHEET));
 
