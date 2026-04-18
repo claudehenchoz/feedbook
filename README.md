@@ -89,3 +89,12 @@ cargo build --release
 ```
 
 The binary lands at `target/release/feedbook` (or `feedbook.exe` on Windows).
+
+### Build for Kobo
+
+```bash
+# One-time setup (needs Docker or Podman)
+cargo install cross --git https://github.com/cross-rs/cross
+
+cross build --release --target armv7-unknown-linux-musleabihf
+```
