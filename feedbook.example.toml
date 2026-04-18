@@ -1,0 +1,49 @@
+# feedbook.example.toml
+#
+# Copy this file to feedbook.toml and adjust to taste.
+# feedbook looks for feedbook.toml in (in order):
+#   1. The directory containing the feedbook binary
+#   2. The current working directory
+#   3. ~/.config/feedbook/feedbook.toml  (or %APPDATA%\feedbook\ on Windows)
+#
+# You can also pass an explicit path: feedbook --config /path/to/feedbook.toml
+
+# ============================================================
+# [defaults] — applied to every feed unless overridden below.
+# All keys are optional; omit any you want to leave at the
+# built-in default.
+# ============================================================
+
+[defaults]
+outfolder       = "~/ebooks"          # where EPUBs are written
+# dbpath        = "~/.local/share/feedbook/feedbook.sql"  # SQLite cache path
+limit           = 50                  # max articles per feed
+kobo            = false               # produce KEPUB by default?
+no_images       = false               # strip images by default?
+max_image_width = 460                 # resize wider images to this
+force           = false               # re-fetch even cached articles?
+stdout          = false               # plain log output instead of progress bars?
+
+# ============================================================
+# [[feeds]] — one entry per feed, processed in order.
+# Only `url` is required; all other keys override [defaults].
+# ============================================================
+
+[[feeds]]
+url   = "https://news.ycombinator.com/rss"
+name  = "Hacker News"   # overrides the feed's own title (affects filename + cover)
+limit = 30
+kobo  = true            # this feed goes to the Kobo
+
+[[feeds]]
+url       = "https://example.com/feed.rss"
+outfolder = "~/ebooks/tech"   # write this feed to a different folder
+limit     = 10
+
+[[feeds]]
+url       = "https://blog.example.org/atom.xml"
+no_images = true        # text-only for this feed
+
+[[feeds]]
+url     = "https://another.example.com/rss"
+enabled = false         # temporarily disabled — won't be processed

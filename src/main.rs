@@ -1,5 +1,6 @@
 mod cache;
 mod cli;
+mod config;
 mod cover;
 mod epub;
 mod error;
@@ -11,11 +12,13 @@ mod scraper;
 mod throttle;
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use clap::Parser;
 use cli::Args;
+use config::{RawDefaults, RawFeed, ResolvedFeedConfig};
 use console::style;
 use error::AppError;
 use futures::StreamExt;
@@ -23,41 +26,39 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::LogSink;
 use tokio::sync::{Mutex, Semaphore};
 
-#[tokio::main]
-async fn main() -> Result<(), AppError> {
-    let args = Args::parse();
+fn resolve_db_path(cfg: &ResolvedFeedConfig) -> Result<PathBuf, AppError> {
+    match &cfg.dbpath {
+        None => cache::db_path(),
+        Some(p) => {
+            let p = PathBuf::from(p);
+            Ok(if p.is_dir() { p.join("feedbook.sql") } else { p })
+        }
+    }
+}
+
+async fn run_feed(
+    cfg: &ResolvedFeedConfig,
+    client: &reqwest::Client,
+    conn: &mut rusqlite::Connection,
+) -> Result<(), AppError> {
     let t_start = std::time::Instant::now();
 
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-        .timeout(Duration::from_secs(10))          // was 30
-        .connect_timeout(Duration::from_secs(5))    // new — caps TLS handshake
-        .build()?;
-
-    // Open DB, prune stale entries, get already-cached URLs
-    let db_path = match &args.dbpath {
-        None => cache::db_path()?,
-        Some(p) => {
-            let p = std::path::PathBuf::from(p);
-            if p.is_dir() { p.join("feedbook.sql") } else { p }
-        }
-    };
-    let mut conn = cache::open_db(&db_path)?;
-    cache::prune(&conn, &args.url)?;
-    cache::prune_images(&conn)?;
-    let cached_urls: HashSet<String> = cache::get_cached_urls(&conn, &args.url)?;
+    // Per-feed prune (TTL + per-feed cap)
+    cache::prune(conn, &cfg.url)?;
+    let cached_urls: HashSet<String> = cache::get_cached_urls(conn, &cfg.url)?;
 
     // Fetch and parse feed
     let t = std::time::Instant::now();
-    let feed_data = feed::fetch_feed(&client, &args.url).await?;
+    let feed_data = feed::fetch_feed(client, &cfg.url).await?;
     eprintln!("[TIMING] feed fetch: {:?}", t.elapsed());
-    let feed_title = feed_data.title;
+    // Apply name override: cfg.name replaces feed's self-reported title
+    let feed_title = cfg.name.clone().unwrap_or(feed_data.title);
     let feed_date  = feed_data.date;
-    if args.stdout {
+    if cfg.stdout {
         eprintln!("Feed: {}", feed_title);
     }
     let mut feed_items = feed_data.items;
-    if let Some(n) = args.limit {
+    if let Some(n) = cfg.limit {
         feed_items.truncate(n);
     }
 
@@ -65,26 +66,23 @@ async fn main() -> Result<(), AppError> {
     let feed_item_count = feed_items.len();
     let to_fetch: Vec<_> = feed_items
         .into_iter()
-        .filter(|item| args.force || !cached_urls.contains(&item.url))
+        .filter(|item| cfg.force || !cached_urls.contains(&item.url))
         .collect();
     let cached_count = feed_item_count - to_fetch.len();
 
     // ── Shared pipeline state ─────────────────────────────────────────────────
 
     let host_times = throttle::new_host_times();
-    // Global cap on concurrent image downloads + processing (per Semaphore permit)
     let image_sem  = Arc::new(Semaphore::new(if cfg!(all(target_arch = "arm", target_env = "musl")) { 3 } else { 8 }));
     let sanitizer  = sanitize::build_sanitizer();
 
-    // Image SHA1 dedup: start with what is already in the DB
-    let cached_sha1s: HashSet<String> = if args.no_images {
+    let cached_sha1s: HashSet<String> = if cfg.no_images {
         HashSet::new()
     } else {
-        cache::get_cached_image_sha1s(&conn)?
+        cache::get_cached_image_sha1s(conn)?
     };
     let seen_sha1s = Arc::new(Mutex::new(cached_sha1s));
 
-    // Live counters for progress bar messages
     let article_fetched = Arc::new(AtomicU64::new(0));
     let img_fetched     = Arc::new(AtomicU64::new(0));
     let img_hits        = Arc::new(AtomicU64::new(0));
@@ -94,7 +92,7 @@ async fn main() -> Result<(), AppError> {
     let article_pb: Option<ProgressBar>;
     let image_pb: Option<ProgressBar>;
 
-    if args.stdout {
+    if cfg.stdout {
         mp         = None;
         article_pb = None;
         image_pb   = None;
@@ -114,7 +112,7 @@ async fn main() -> Result<(), AppError> {
             apb.inc(cached_count as u64);
             apb.set_message(style(format!("{} cached", cached_count)).dim().to_string());
         }
-        let ipb: Option<ProgressBar> = if args.no_images || to_fetch.is_empty() {
+        let ipb: Option<ProgressBar> = if cfg.no_images || to_fetch.is_empty() {
             None
         } else {
             let pb = m.add(ProgressBar::new(0));
@@ -132,26 +130,30 @@ async fn main() -> Result<(), AppError> {
         image_pb   = ipb;
     };
 
-    // ── Start favicon fetch immediately (only needs the feed URL) ─────────────
+    // ── Start favicon fetch immediately ──────────────────────────────────────
 
-    let domain_title    = cover::extract_domain_title(&args.url);
+    // Use cfg.name as the cover title if provided, otherwise derive from URL
+    let domain_title    = cfg.name.clone().unwrap_or_else(|| cover::extract_domain_title(&cfg.url));
     let client_favicon  = client.clone();
-    let url_for_favicon = args.url.clone();
+    let url_for_favicon = cfg.url.clone();
     let favicon_handle  = tokio::spawn(async move {
         cover::fetch_favicon(&client_favicon, &url_for_favicon).await
     });
 
     // ── Run article+image pipeline concurrently with cover generation ─────────
 
-    // On single-core ARM (Kobo), lower concurrency avoids cache thrashing
     let img_concurrency     = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 4 };
     let article_concurrency = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 5 };
 
-    // Cover caching: skip expensive generation if feed+date hasn't changed
-    let cover_key = format!("{}|{}", args.url,
+    // Include name in cover key so a name change busts the cached cover
+    let cover_key = format!("{}|{}|{}", cfg.url, cfg.name.as_deref().unwrap_or(""),
         feed_date.map(|d| d.to_rfc3339()).unwrap_or_default());
-    let cover_from_cache = cache::get_cached_cover(&conn, &cover_key)?;
+    let cover_from_cache = cache::get_cached_cover(conn, &cover_key)?;
     let had_cached_cover = cover_from_cache.is_some();
+
+    let no_images = cfg.no_images;
+    let max_w     = cfg.max_image_width;
+    let stdout    = cfg.stdout;
 
     let t_pipeline = std::time::Instant::now();
     let (pipeline_result, cover_png) = tokio::join!(
@@ -168,9 +170,6 @@ async fn main() -> Result<(), AppError> {
             let article_fetched = article_fetched.clone();
             let img_fetched     = img_fetched.clone();
             let img_hits        = img_hits.clone();
-            let no_images       = args.no_images;
-            let max_w           = args.max_image_width;
-            let stdout          = args.stdout;
             async move {
                 let results: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> =
                     futures::stream::iter(to_fetch)
@@ -207,7 +206,6 @@ async fn main() -> Result<(), AppError> {
                                         &client, item, sanitizer, &host_times, log.clone(),
                                     ).await;
 
-                                    // Update article progress or log to stdout
                                     if stdout {
                                         let label = maybe_article.as_ref()
                                             .and_then(|a| a.title.as_deref())
@@ -234,7 +232,6 @@ async fn main() -> Result<(), AppError> {
                                             &article.url,
                                         );
 
-                                        // Partition into already-seen (cache hit) vs new
                                         let (hit_count, to_download) = {
                                             let mut seen = seen_sha1s.lock().await;
                                             let mut hits = 0u64;
@@ -333,7 +330,6 @@ async fn main() -> Result<(), AppError> {
         {
             let mp_cover     = mp.clone();
             let domain_title = domain_title.clone();
-            let stdout       = args.stdout;
             async move {
                 let cover_sp = mp_cover.as_ref().map(|m| {
                     let sp = m.add(ProgressBar::new_spinner());
@@ -386,7 +382,7 @@ async fn main() -> Result<(), AppError> {
 
     if !had_cached_cover {
         if let Some(ref png) = cover_png {
-            let _ = cache::store_cover(&conn, &cover_key, png);
+            let _ = cache::store_cover(conn, &cover_key, png);
         }
     }
 
@@ -398,15 +394,15 @@ async fn main() -> Result<(), AppError> {
         for img in article_images {
             cache::insert_image(&*tx, img)?;
         }
-        cache::insert_article(&*tx, &args.url, article)?;
+        cache::insert_article(&*tx, &cfg.url, article)?;
     }
     tx.commit()?;
     eprintln!("[TIMING] db inserts ({} articles): {:?}", pipeline_result.len(), t.elapsed());
 
-    // ── Load from DB (respects --limit) ──────────────────────────────────────
+    // ── Load from DB (respects limit) ────────────────────────────────────────
 
     let t = std::time::Instant::now();
-    let all_articles = cache::load_articles(&conn, &args.url, args.limit)?;
+    let all_articles = cache::load_articles(conn, &cfg.url, cfg.limit)?;
     eprintln!("[TIMING] db load ({} articles): {:?}", all_articles.len(), t.elapsed());
 
     if all_articles.is_empty() {
@@ -415,7 +411,7 @@ async fn main() -> Result<(), AppError> {
     }
 
     // Collect the images referenced by the EPUB articles
-    let epub_images: HashMap<String, images::ProcessedImage> = if args.no_images {
+    let epub_images: HashMap<String, images::ProcessedImage> = if cfg.no_images {
         HashMap::new()
     } else {
         let sha1s: Vec<String> = {
@@ -428,7 +424,7 @@ async fn main() -> Result<(), AppError> {
                 .filter(|s| seen.insert(s.clone()))
                 .collect()
         };
-        cache::load_images(&conn, &sha1s)?
+        cache::load_images(conn, &sha1s)?
             .into_iter()
             .map(|img| (img.url_sha1.clone(), img))
             .collect()
@@ -440,24 +436,24 @@ async fn main() -> Result<(), AppError> {
         let sp = m.add(ProgressBar::new_spinner());
         sp.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
         sp.set_message(format!("Building {} ({} articles)...",
-            if args.kobo { "KEPUB" } else { "EPUB" }, all_articles.len()));
+            if cfg.kobo { "KEPUB" } else { "EPUB" }, all_articles.len()));
         sp
     });
-    if epub_sp.is_none() && args.stdout {
+    if epub_sp.is_none() && cfg.stdout {
         eprintln!("Building {} ({} articles)...",
-            if args.kobo { "KEPUB" } else { "EPUB" }, all_articles.len());
+            if cfg.kobo { "KEPUB" } else { "EPUB" }, all_articles.len());
     }
 
-    let output_path = epub::derive_output_path(&feed_title, args.kobo);
-    let output_path = if let Some(ref folder) = args.outfolder {
-        let dir = std::path::PathBuf::from(folder);
+    let output_path = epub::derive_output_path(&feed_title, cfg.kobo);
+    let output_path = if let Some(ref folder) = cfg.outfolder {
+        let dir = PathBuf::from(folder);
         std::fs::create_dir_all(&dir)?;
         dir.join(output_path)
     } else {
         output_path
     };
     let output_display = output_path.display().to_string();
-    let kobo = args.kobo;
+    let kobo = cfg.kobo;
 
     let t = std::time::Instant::now();
     let epub_result = tokio::task::spawn_blocking(move || {
@@ -474,6 +470,63 @@ async fn main() -> Result<(), AppError> {
         sp.finish_with_message(format!("Written: {}", output_display));
     } else {
         eprintln!("Written: {}", output_display);
+    }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), AppError> {
+    let args = Args::parse();
+
+    let config_result = config::load_config(args.config.as_deref())?;
+
+    let (feeds_to_run, db_path): (Vec<ResolvedFeedConfig>, PathBuf) = match &config_result {
+        None => {
+            let url = args.url.clone().ok_or(AppError::NoUrl)?;
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let cfg = config::merge(&args, &RawDefaults::default(), &RawFeed::ad_hoc(url), &cwd);
+            let db = resolve_db_path(&cfg)?;
+            (vec![cfg], db)
+        }
+        Some((raw_config, config_path)) => {
+            let config_dir = config_path.parent().unwrap_or(Path::new("."));
+            let defaults = raw_config.defaults.as_ref().cloned().unwrap_or_default();
+
+            let feeds: Vec<ResolvedFeedConfig> = if let Some(url) = &args.url {
+                let feed = raw_config.feeds.iter().find(|f| &f.url == url);
+                let f = feed.cloned().unwrap_or_else(|| RawFeed::ad_hoc(url.clone()));
+                vec![config::merge(&args, &defaults, &f, config_dir)]
+            } else {
+                raw_config.feeds.iter()
+                    .filter(|f| f.enabled.unwrap_or(true))
+                    .map(|f| config::merge(&args, &defaults, f, config_dir))
+                    .collect()
+            };
+
+            if feeds.is_empty() {
+                eprintln!("No feeds to process.");
+                return Ok(());
+            }
+
+            let db = resolve_db_path(&feeds[0])?;
+            (feeds, db)
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .build()?;
+
+    let mut conn = cache::open_db(&db_path)?;
+    cache::prune_images(&conn)?;
+
+    for cfg in &feeds_to_run {
+        if let Err(e) = run_feed(cfg, &client, &mut conn).await {
+            eprintln!("Error processing {}: {e}", cfg.url);
+        }
     }
 
     Ok(())

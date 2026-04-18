@@ -5,12 +5,13 @@ Convert any RSS or Atom feed into a clean, readable EPUB file. Point it at a fee
 ## Usage
 
 ```
-feedbook --url <feed-url> [options]
+feedbook [--url <feed-url>] [--config <path>] [options]
 ```
 
 | Flag                | Default                  | Description                                                              |
 |---------------------|--------------------------|--------------------------------------------------------------------------|
-| `--url`             | *(required)*             | URL of an RSS or Atom feed                                               |
+| `--url`             | *(see below)*            | URL of an RSS or Atom feed                                               |
+| `--config`          | *(auto-discovered)*      | Path to a `feedbook.toml` config file                                    |
 | `--limit`           | *(all)*                  | Maximum number of articles to include (newest first)                     |
 | `--outfolder`       | current directory        | Directory where the output file is written                               |
 | `--dbpath`          | system local-data dir    | Path to the SQLite database file, or a directory (uses `feedbook.sql`)   |
@@ -40,11 +41,17 @@ feedbook --url https://example.com/feed.rss --stdout --dbpath /data --outfolder 
 
 # Force re-fetch, skip images
 feedbook --url https://example.com/feed.rss --force --no-images
+
+# Process all feeds defined in a config file
+feedbook
+
+# Use an alternate config file
+feedbook --config ~/kobo-feeds.toml
 ```
 
 ### Output file naming
 
-The output filename is derived from the feed title: lowercased, non-alphanumeric characters replaced with hyphens. A feed titled "Hacker News" produces `hacker-news.epub` (or `hacker-news.kepub.epub` with `--kobo`).
+The output filename is derived from the feed title: lowercased, non-alphanumeric characters replaced with hyphens. A feed titled "Hacker News" produces `hacker-news.epub` (or `hacker-news.kepub.epub` with `--kobo`). The `name` key in a config file overrides the feed's self-reported title.
 
 ### Caching
 
@@ -71,6 +78,74 @@ Cover ready
 Building EPUB (2 articles)...
 Written: hacker-news.epub
 ```
+
+---
+
+## Config file
+
+For regular use with one or more feeds, create a `feedbook.toml` instead of typing flags every time.
+
+### Discovery order
+
+feedbook looks for `feedbook.toml` in:
+
+1. The directory containing the feedbook binary
+2. The current working directory
+3. `~/.config/feedbook/feedbook.toml` (or `%APPDATA%\feedbook\` on Windows)
+
+Pass `--config <path>` to use a specific file instead.
+
+### Structure
+
+```toml
+# Global defaults — applied to every feed unless overridden.
+[defaults]
+outfolder       = "~/ebooks"
+limit           = 50
+kobo            = false
+no_images       = false
+max_image_width = 460
+
+# One [[feeds]] entry per feed, processed in order.
+[[feeds]]
+url   = "https://news.ycombinator.com/rss"
+name  = "Hacker News"   # overrides the feed's own title (filename + cover)
+limit = 30
+kobo  = true
+
+[[feeds]]
+url       = "https://example.com/feed.rss"
+outfolder = "~/ebooks/tech"   # override a single setting for this feed
+
+[[feeds]]
+url     = "https://another.example.com/rss"
+enabled = false               # skip without deleting the entry
+```
+
+### Precedence
+
+CLI flags > per-feed config > `[defaults]` > built-in defaults.
+
+When `--url` is given alongside a config file, only that feed is processed. If the URL matches a `[[feeds]]` entry its settings apply; otherwise it runs as a one-off with `[defaults]`.
+
+### Per-feed keys
+
+| Key             | Type    | Description                                                    |
+|-----------------|---------|----------------------------------------------------------------|
+| `url`           | string  | *(required)* Feed URL                                          |
+| `name`          | string  | Override the feed's self-reported title                        |
+| `enabled`       | bool    | Set to `false` to skip this feed (default: `true`)             |
+| `limit`         | integer | Max articles                                                   |
+| `kobo`          | bool    | Produce KEPUB                                                  |
+| `no_images`     | bool    | Strip images                                                   |
+| `max_image_width` | integer | Resize wider images to this pixel width                      |
+| `force`         | bool    | Re-fetch even cached articles                                  |
+| `stdout`        | bool    | Plain log output                                               |
+| `outfolder`     | string  | Output directory (tilde-expanded, relative to config file)     |
+
+`dbpath` is only valid in `[defaults]`, not per feed.
+
+A copy of `feedbook.example.toml` with all options annotated is included in the repository.
 
 ---
 
