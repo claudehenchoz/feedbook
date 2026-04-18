@@ -26,10 +26,12 @@ use tokio::sync::{Mutex, Semaphore};
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     let args = Args::parse();
+    let t_start = std::time::Instant::now();
 
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(10))          // was 30
+        .connect_timeout(Duration::from_secs(5))    // new — caps TLS handshake
         .build()?;
 
     // Open DB, prune stale entries, get already-cached URLs
@@ -46,7 +48,9 @@ async fn main() -> Result<(), AppError> {
     let cached_urls: HashSet<String> = cache::get_cached_urls(&conn, &args.url)?;
 
     // Fetch and parse feed
+    let t = std::time::Instant::now();
     let feed_data = feed::fetch_feed(&client, &args.url).await?;
+    eprintln!("[TIMING] feed fetch: {:?}", t.elapsed());
     let feed_title = feed_data.title;
     let feed_date  = feed_data.date;
     if args.stdout {
@@ -149,6 +153,7 @@ async fn main() -> Result<(), AppError> {
     let cover_from_cache = cache::get_cached_cover(&conn, &cover_key)?;
     let had_cached_cover = cover_from_cache.is_some();
 
+    let t_pipeline = std::time::Instant::now();
     let (pipeline_result, cover_png) = tokio::join!(
 
         // ── Arm A: per-article scrape → per-article image download ────────────
@@ -342,10 +347,13 @@ async fn main() -> Result<(), AppError> {
                 if let Some(cached) = cover_from_cache {
                     if let Some(sp) = cover_sp { sp.finish_with_message("Cover cached"); }
                     else if stdout { eprintln!("Cover cached"); }
+                    eprintln!("[TIMING] cover: cached (skipped generation)");
                     return Some(cached);
                 }
 
+                let t_favicon = std::time::Instant::now();
                 let favicon = favicon_handle.await.ok().flatten();
+                eprintln!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed());
 
                 if let Some(ref sp) = cover_sp {
                     sp.set_message("Generating cover...");
@@ -353,12 +361,14 @@ async fn main() -> Result<(), AppError> {
                     eprintln!("Generating cover...");
                 }
                 let title_owned = domain_title;
+                let t_cover = std::time::Instant::now();
                 let result = tokio::task::spawn_blocking(move || {
                     cover::generate_cover(&title_owned, feed_date, favicon.as_deref())
                 })
                 .await
                 .ok()
                 .and_then(|r| r.ok());
+                eprintln!("[TIMING] cover generate: {:?}", t_cover.elapsed());
 
                 if let Some(sp) = cover_sp {
                     sp.finish_with_message("Cover ready");
@@ -370,6 +380,8 @@ async fn main() -> Result<(), AppError> {
         },
     );
 
+    eprintln!("[TIMING] pipeline (articles + cover, concurrent): {:?}", t_pipeline.elapsed());
+
     // ── Store newly generated cover in cache ──────────────────────────────────
 
     if !had_cached_cover {
@@ -380,6 +392,7 @@ async fn main() -> Result<(), AppError> {
 
     // ── Batch DB inserts (all on the main task — rusqlite is !Send) ───────────
 
+    let t = std::time::Instant::now();
     let tx = conn.transaction()?;
     for (article, article_images) in &pipeline_result {
         for img in article_images {
@@ -388,10 +401,13 @@ async fn main() -> Result<(), AppError> {
         cache::insert_article(&*tx, &args.url, article)?;
     }
     tx.commit()?;
+    eprintln!("[TIMING] db inserts ({} articles): {:?}", pipeline_result.len(), t.elapsed());
 
     // ── Load from DB (respects --limit) ──────────────────────────────────────
 
+    let t = std::time::Instant::now();
     let all_articles = cache::load_articles(&conn, &args.url, args.limit)?;
+    eprintln!("[TIMING] db load ({} articles): {:?}", all_articles.len(), t.elapsed());
 
     if all_articles.is_empty() {
         eprintln!("No articles found.");
@@ -443,6 +459,7 @@ async fn main() -> Result<(), AppError> {
     let output_display = output_path.display().to_string();
     let kobo = args.kobo;
 
+    let t = std::time::Instant::now();
     let epub_result = tokio::task::spawn_blocking(move || {
         epub::build_epub(&feed_title, &all_articles, &epub_images, cover_png, &output_path, kobo)
     })
@@ -450,6 +467,8 @@ async fn main() -> Result<(), AppError> {
     .map_err(|e| AppError::Other(format!("EPUB task panicked: {e}")))?;
 
     epub_result?;
+    eprintln!("[TIMING] epub build: {:?}", t.elapsed());
+    eprintln!("[TIMING] total: {:?}", t_start.elapsed());
 
     if let Some(sp) = epub_sp {
         sp.finish_with_message(format!("Written: {}", output_display));

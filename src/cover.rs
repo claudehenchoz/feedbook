@@ -311,70 +311,23 @@ pub fn generate_cover(
         }
     }
 
-    let buf = encode_png_optimized(&img)?;
+    let buf = encode_png_fast(&img)?;
     Ok(buf)
 }
 
-/// Encodes an RGBA image as a heavily-optimized PNG:
-/// 1. Quantize to an indexed palette (imagequant)
-/// 2. Write as 8-bit indexed PNG (png crate)
-/// 3. Post-process with oxipng for further size reduction
-fn encode_png_optimized(img: &RgbaImage) -> Result<Vec<u8>, AppError> {
-    let (w, h) = (img.width(), img.height());
-
-    // --- Step 1: Quantize RGBA -> palette ---
-    let mut liq = imagequant::new();
-    liq.set_quality(0, 90)
-        .map_err(|e| AppError::Other(format!("imagequant config: {e}")))?;
-    liq.set_speed(4)
-        .map_err(|e| AppError::Other(format!("imagequant speed: {e}")))?;
-
-    // imagequant wants &[RGBA] — reinterpret the raw u8 buffer.
-    let pixels: &[imagequant::RGBA] = bytemuck::cast_slice(img.as_raw());
-    let mut qimg = liq
-        .new_image(pixels, w as usize, h as usize, 0.0)
-        .map_err(|e| AppError::Other(format!("imagequant new_image: {e}")))?;
-
-    let mut res = liq
-        .quantize(&mut qimg)
-        .map_err(|e| AppError::Other(format!("imagequant quantize: {e}")))?;
-    res.set_dithering_level(1.0)
-        .map_err(|e| AppError::Other(format!("imagequant dither: {e}")))?;
-
-    let (palette, indexed_pixels) = res
-        .remapped(&mut qimg)
-        .map_err(|e| AppError::Other(format!("imagequant remap: {e}")))?;
-
-    // --- Step 2: Write indexed PNG ---
-    let mut png_buf: Vec<u8> = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut png_buf, w, h);
-        enc.set_color(png::ColorType::Indexed);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.set_compression(png::Compression::High);
-
-        let pal_rgb: Vec<u8> = palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect();
-        let pal_a: Vec<u8> = palette.iter().map(|c| c.a).collect();
-        enc.set_palette(pal_rgb);
-        // Only emit a tRNS chunk if any palette entry is non-opaque.
-        if pal_a.iter().any(|&a| a < 255) {
-            enc.set_trns(pal_a);
-        }
-
-        let mut writer = enc
-            .write_header()
-            .map_err(|e| AppError::Other(format!("png header: {e}")))?;
-        writer
-            .write_image_data(&indexed_pixels)
-            .map_err(|e| AppError::Other(format!("png data: {e}")))?;
-    }
-
-    // --- Step 3: Post-process with oxipng ---
-    let opts = oxipng::Options::from_preset(2); // 0=fast, 6=max; 2 is ~10x faster for ~3% size penalty
-    let optimized = oxipng::optimize_from_memory(&png_buf, &opts)
-        .map_err(|e| AppError::Other(format!("oxipng: {e}")))?;
-
-    Ok(optimized)
+// Simplified PNG encoding using the `png` crate, which is faster than `image`'s encoder.
+fn encode_png_fast(img: &RgbaImage) -> Result<Vec<u8>, AppError> {
+    let mut buf = Vec::new();
+    let mut encoder = png::Encoder::new(&mut buf, img.width(), img.height());
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder.write_header()
+        .map_err(|e| AppError::Other(format!("png header: {e}")))?;
+    writer.write_image_data(img.as_raw())
+        .map_err(|e| AppError::Other(format!("png data: {e}")))?;
+    drop(writer);
+    Ok(buf)
 }
 
 fn decode_and_resize_favicon(bytes: &[u8], cell_w: u32, cell_h: u32) -> Option<RgbaImage> {

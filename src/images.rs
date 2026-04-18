@@ -44,16 +44,24 @@ pub fn extract_image_urls(html: &str, article_url: &str) -> Vec<(String, String)
             if raw.starts_with("data:") {
                 return None;
             }
+
+            // Decode HTML entities in the src value before URL parsing.
+            // Sanitized XHTML uses `&amp;` inside attribute values (correct for XHTML),
+            // but the HTTP client needs the actual `&` in query strings. Without this,
+            // requests go out with literal `&amp;` and servers return 404s or garbage
+            // that fails to decode as an image.
+            let decoded = decode_html_entities(&raw);
+
             // Resolve to absolute URL
-            let abs = if let Ok(parsed) = url::Url::parse(&raw) {
+            let abs = if let Ok(parsed) = url::Url::parse(&decoded) {
                 // Already absolute — only allow http/https
                 if parsed.scheme() != "http" && parsed.scheme() != "https" {
                     return None;
                 }
-                raw.clone()
+                parsed.to_string()
             } else {
                 // Try to resolve as relative
-                match base.join(&raw) {
+                match base.join(&decoded) {
                     Ok(resolved) => {
                         if resolved.scheme() != "http" && resolved.scheme() != "https" {
                             return None;
@@ -63,9 +71,26 @@ pub fn extract_image_urls(html: &str, article_url: &str) -> Vec<(String, String)
                     Err(_) => return None,
                 }
             };
+            // Return (original raw src, decoded absolute URL).
+            // raw is the map key that matches what's in the HTML.
+            // abs is what we actually fetch, and what url_sha1 is computed on.
             Some((raw, abs))
         })
         .collect()
+}
+
+/// Decodes the small set of HTML entities that appear in XHTML attribute values.
+/// Ammonia's output only ever produces these five, so handling them is sufficient.
+fn decode_html_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string(); // fast path: nothing to decode
+    }
+    s.replace("&amp;", "&")
+     .replace("&lt;", "<")
+     .replace("&gt;", ">")
+     .replace("&quot;", "\"")
+     .replace("&#39;", "'")
+     .replace("&apos;", "'")
 }
 
 /// Rewrites `<img src="raw_src">` references using the provided map.
