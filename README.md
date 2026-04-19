@@ -157,23 +157,21 @@ When `--url` is given alongside a config file, only that feed is processed. If t
 
 ### Per-feed keys
 
-| Key             | Type    | Description                                                    |
-|-----------------|---------|----------------------------------------------------------------|
-| Key                  | Type           | Description                                                    |
-|----------------------|----------------|----------------------------------------------------------------|
-| `url`                | string         | *(required)* Feed URL                                          |
-| `name`               | string         | Override the feed's self-reported title                        |
-| `enabled`            | bool           | Set to `false` to skip this feed (default: `true`)             |
-| `limit`              | integer        | Max articles                                                   |
-| `kobo`               | bool           | Produce KEPUB                                                  |
-| `no_images`          | bool           | Strip images                                                   |
-| `max_image_width`    | integer        | Resize wider images to this pixel width                        |
-| `force`              | bool           | Re-fetch even cached articles                                  |
-| `stdout`             | bool           | Plain log output                                               |
-| `outfolder`          | string         | Output directory (tilde-expanded, relative to config file)     |
-| `content_selectors`  | array of strings | CSS selectors for the article body; bypasses Readability when set |
-| `remove_selectors`   | array of strings | CSS selectors for elements to strip before extraction          |
-| `report_times`       | bool             | Print `[TIMING]` lines to stderr for each pipeline stage       |
+| Key                 | Type             | Description                                                       |
+|---------------------|------------------|-------------------------------------------------------------------|
+| `url`               | string           | *(required)* Feed URL                                             |
+| `name`              | string           | Override the feed's self-reported title                           |
+| `enabled`           | bool             | Set to `false` to skip this feed (default: `true`)                |
+| `limit`             | integer          | Max articles                                                      |
+| `kobo`              | bool             | Produce KEPUB                                                     |
+| `no_images`         | bool             | Strip images                                                      |
+| `max_image_width`   | integer          | Resize wider images to this pixel width                           |
+| `force`             | bool             | Re-fetch even cached articles                                     |
+| `stdout`            | bool             | Plain log output                                                  |
+| `outfolder`         | string           | Output directory (tilde-expanded, relative to config file)        |
+| `content_selectors` | array of strings | CSS selectors for the article body; bypasses Readability when set |
+| `remove_selectors`  | array of strings | CSS selectors for elements to strip before extraction             |
+| `report_times`      | bool             | Print `[TIMING]` lines to stderr for each pipeline stage          |
 
 `dbpath` is only valid in `[defaults]`, not per feed.
 
