@@ -1,0 +1,6 @@
+1. Install NickelMenu first: https://pgaskin.net/NickelMenu/#install
+2. Connect your Kobo via USB.
+3. Drag the .adds folder from this zip onto your Kobo.
+4. Eject, connect to wifi, tap NickelMenu → Feedbook.
+
+Edit .adds/feedbook/feedbook.toml to add more feeds.

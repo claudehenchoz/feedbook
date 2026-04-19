@@ -1,0 +1,1 @@
+menu_item :main :Feedbook :cmd_spawn :quiet:/bin/sh /mnt/onboard/.adds/feedbook/run.sh

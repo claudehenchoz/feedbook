@@ -1,0 +1,8 @@
+# Kobo install kit: Unix line endings everywhere, binary is binary
+install/kobo/.adds/feedbook/run.sh           text eol=lf
+install/kobo/.adds/feedbook/feedbook.toml    text eol=lf
+install/kobo/.adds/feedbook/feeds.d/*.toml   text eol=lf
+install/kobo/.adds/feedbook/feeds.d/*.txt    text eol=lf
+install/kobo/.adds/nm/feedbook               text eol=lf
+install/kobo/INSTALL.txt                     text eol=lf
+install/kobo/.adds/feedbook/feedbook         binary
