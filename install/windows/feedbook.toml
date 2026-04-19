@@ -1,0 +1,7 @@
+[defaults]
+limit           = 20                                # max articles per feed
+max_image_width = 460                               # resize wider images to this
+stdout          = true                              # plain log output instead of progress bars?
+
+[[feeds]]
+url   = "https://hnrss.org/newest?points=100"
