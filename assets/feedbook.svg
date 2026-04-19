@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 384 448"
+   fill="none"
+   version="1.1"
+   id="svg13"
+   sodipodi:docname="feedbook.svg"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   width="384"
+   height="448"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs13" />
+  <sodipodi:namedview
+     id="namedview13"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="1.1611328"
+     inkscape:cx="-154.1598"
+     inkscape:cy="341.47687"
+     inkscape:window-width="2560"
+     inkscape:window-height="1369"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg13" />
+  <!-- Outer blue rounded square -->
+  <rect
+     x="0"
+     y="0"
+     width="384"
+     height="448"
+     rx="40"
+     ry="40"
+     fill="#4a80bd"
+     id="rect1"
+     style="fill:#333333" />
+  <!-- Inner light gray border -->
+  <rect
+     x="32"
+     y="32"
+     width="320"
+     height="384"
+     rx="16"
+     ry="16"
+     fill="#c9ced3"
+     id="rect2" />
+  <!-- White page -->
+  <rect
+     x="48"
+     y="48"
+     width="288"
+     height="352"
+     rx="8"
+     ry="8"
+     fill="#ffffff"
+     id="rect3" />
+  <!-- Text lines (dark navy) -->
+  <g
+     fill="#1f4e79"
+     id="g12"
+     transform="translate(-64,-32)">
+    <!-- Line 1 (long) -->
+    <!-- Line 2 (medium) -->
+    <g
+       id="g15">
+      <rect
+         x="140"
+         y="104.59377"
+         width="232"
+         height="20"
+         rx="4"
+         id="rect4" />
+      <rect
+         x="140"
+         y="139.59378"
+         width="150"
+         height="20"
+         rx="4"
+         id="rect5" />
+    </g>
+    <!-- Line 3 (long) -->
+    <!-- Line 4 (short) -->
+    <g
+       id="g14"
+       transform="translate(0,-11.93748)">
+      <rect
+         x="140"
+         y="210"
+         width="232"
+         height="20"
+         rx="4"
+         id="rect6" />
+      <rect
+         x="140"
+         y="245"
+         width="120"
+         height="20"
+         rx="4"
+         id="rect7" />
+    </g>
+    <!-- Line 5 (long) -->
+    <!-- Line 6 (two segments) -->
+    <g
+       id="g16"
+       transform="translate(0,1.5312602)">
+      <rect
+         x="140"
+         y="290"
+         width="232"
+         height="20"
+         rx="4"
+         id="rect8" />
+      <rect
+         x="140"
+         y="325"
+         width="150"
+         height="20"
+         rx="4"
+         id="rect9" />
+      <rect
+         x="300"
+         y="325"
+         width="50"
+         height="20"
+         rx="4"
+         id="rect10" />
+    </g>
+    <!-- Line 7 (split by refresh icon) -->
+    <g
+       id="g17">
+      <rect
+         x="140"
+         y="385"
+         width="75"
+         height="20"
+         rx="4"
+         id="rect11" />
+      <rect
+         x="295"
+         y="385"
+         width="80"
+         height="20"
+         rx="4"
+         id="rect12" />
+    </g>
+  </g>
+  <!-- Refresh / circular arrow icon -->
+  <path
+     d="m 199.70252,339.21767 a 25,25 0 1 1 -19.07524,1.5165 l 3.6536,7.15374 a 17,17 0 1 0 12.95676,-1.05944 z"
+     id="path12"
+     style="fill:#1f4e79" />
+  <polygon
+     points="252,388 238,370 252,364 "
+     id="polygon12"
+     transform="matrix(1.0645951,0.78181134,-0.51812869,0.58337464,116.45652,-67.05735)"
+     style="fill:#1f4e79" />
+</svg>
