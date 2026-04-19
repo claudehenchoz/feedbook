@@ -3,7 +3,7 @@ use chrono::{DateTime, Datelike, Timelike, Utc};
 use image::{Rgba, RgbaImage};
 use crate::error::AppError;
 
-static FONT_BYTES: &[u8] = include_bytes!("../fonts/texgyreheros-bold.otf");
+static FONT_BYTES: &[u8] = include_bytes!("../assets/texgyreheros-bold.otf");
 
 const W: u32 = 1262;
 const H: u32 = 1680;
