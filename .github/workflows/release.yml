@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # needed to create releases
+
+jobs:
+  build-kobo:
+    name: Build Kobo install kit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build feedbook for Kobo (armv7 musl)
+        run: cross build --release --target armv7-unknown-linux-musleabihf
+
+      - name: Assemble install kit
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="feedbook-kobo-${VERSION}"
+
+          # Copy the tracked kit skeleton into a staging dir
+          cp -r install/kobo "${STAGE}"
+
+          # Inject the freshly built binary
+          cp target/armv7-unknown-linux-musleabihf/release/feedbook \
+             "${STAGE}/.adds/feedbook/feedbook"
+          chmod +x "${STAGE}/.adds/feedbook/feedbook"
+          chmod +x "${STAGE}/.adds/feedbook/run.sh"
+
+          # Sanity check: confirm the binary is actually ARM
+          file "${STAGE}/.adds/feedbook/feedbook"
+
+          # Zip it, preserving permissions and dot-folders
+          zip -r "${STAGE}.zip" "${STAGE}"
+
+          echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
+
+      - name: Upload zip as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+
+      - name: Create GitHub Release and attach zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.STAGE }}.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
