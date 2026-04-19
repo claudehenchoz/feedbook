@@ -45,5 +45,14 @@ url       = "https://blog.example.org/atom.xml"
 no_images = true        # text-only for this feed
 
 [[feeds]]
+# Use explicit CSS selectors instead of Readability for a site that
+# doesn't extract cleanly.  content_selectors defines what to keep;
+# remove_selectors strips noise before extraction.  Falls back to
+# Readability automatically if no content selectors match.
+url                = "https://awkward-site.example.com/rss"
+content_selectors  = ["article.post", ".entry-content"]
+remove_selectors   = [".post-footer", ".related-posts", ".sidebar"]
+
+[[feeds]]
 url     = "https://another.example.com/rss"
 enabled = false         # temporarily disabled — won't be processed

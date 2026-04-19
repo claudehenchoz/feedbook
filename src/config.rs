@@ -12,8 +12,10 @@ pub struct RawDefaults {
     pub kobo:            Option<bool>,
     pub no_images:       Option<bool>,
     pub max_image_width: Option<u32>,
-    pub force:           Option<bool>,
-    pub stdout:          Option<bool>,
+    pub force:             Option<bool>,
+    pub stdout:            Option<bool>,
+    pub content_selectors: Option<Vec<String>>,
+    pub remove_selectors:  Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -26,9 +28,11 @@ pub struct RawFeed {
     pub kobo:            Option<bool>,
     pub no_images:       Option<bool>,
     pub max_image_width: Option<u32>,
-    pub force:           Option<bool>,
-    pub stdout:          Option<bool>,
-    pub outfolder:       Option<String>,
+    pub force:             Option<bool>,
+    pub stdout:            Option<bool>,
+    pub outfolder:         Option<String>,
+    pub content_selectors: Option<Vec<String>>,
+    pub remove_selectors:  Option<Vec<String>>,
     // dbpath intentionally absent — deny_unknown_fields rejects it with a clear error
 }
 
@@ -45,6 +49,8 @@ impl RawFeed {
             force: None,
             stdout: None,
             outfolder: None,
+            content_selectors: None,
+            remove_selectors: None,
         }
     }
 }
@@ -58,16 +64,18 @@ pub struct RawConfig {
 }
 
 pub struct ResolvedFeedConfig {
-    pub url:             String,
-    pub name:            Option<String>,
-    pub limit:           Option<usize>,
-    pub force:           bool,
-    pub no_images:       bool,
-    pub max_image_width: u32,
-    pub dbpath:          Option<String>,
-    pub stdout:          bool,
-    pub kobo:            bool,
-    pub outfolder:       Option<String>,
+    pub url:               String,
+    pub name:              Option<String>,
+    pub limit:             Option<usize>,
+    pub force:             bool,
+    pub no_images:         bool,
+    pub max_image_width:   u32,
+    pub dbpath:            Option<String>,
+    pub stdout:            bool,
+    pub kobo:              bool,
+    pub outfolder:         Option<String>,
+    pub content_selectors: Option<Vec<String>>,
+    pub remove_selectors:  Option<Vec<String>>,
 }
 
 pub fn resolve_path(raw: &str, config_dir: &Path) -> PathBuf {
@@ -94,9 +102,15 @@ pub fn merge(cli: &Args, defaults: &RawDefaults, feed: &RawFeed, config_dir: &Pa
                              .or_else(|| defaults.dbpath.as_deref().map(&resolve)),
         stdout:          cli.stdout.or(feed.stdout).or(defaults.stdout).unwrap_or(false),
         kobo:            cli.kobo.or(feed.kobo).or(defaults.kobo).unwrap_or(false),
-        outfolder:       cli.outfolder.as_deref().map(&resolve)
-                             .or_else(|| feed.outfolder.as_deref().map(&resolve))
-                             .or_else(|| defaults.outfolder.as_deref().map(&resolve)),
+        outfolder:         cli.outfolder.as_deref().map(&resolve)
+                               .or_else(|| feed.outfolder.as_deref().map(&resolve))
+                               .or_else(|| defaults.outfolder.as_deref().map(&resolve)),
+        content_selectors: cli.content_selectors.clone()
+                               .or_else(|| feed.content_selectors.clone())
+                               .or_else(|| defaults.content_selectors.clone()),
+        remove_selectors:  cli.remove_selectors.clone()
+                               .or_else(|| feed.remove_selectors.clone())
+                               .or_else(|| defaults.remove_selectors.clone()),
     }
 }
 

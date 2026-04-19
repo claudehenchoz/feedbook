@@ -10,16 +10,18 @@ feedbook [--url <feed-url>] [--config <path>] [options]
 
 | Flag                | Default                  | Description                                                              |
 |---------------------|--------------------------|--------------------------------------------------------------------------|
-| `--url`             | *(see below)*            | URL of an RSS or Atom feed                                               |
-| `--config`          | *(auto-discovered)*      | Path to a `feedbook.toml` config file                                    |
-| `--limit`           | *(all)*                  | Maximum number of articles to include (newest first)                     |
-| `--outfolder`       | current directory        | Directory where the output file is written                               |
-| `--dbpath`          | system local-data dir    | Path to the SQLite database file, or a directory (uses `feedbook.sql`)   |
-| `--kobo`            | off                      | Produce a Kobo KEPUB (`.kepub.epub`) instead of a standard EPUB          |
-| `--stdout`          | off                      | Print plain log lines instead of progress bars (for CI/CD)               |
-| `--force`           | off                      | Re-fetch all articles, ignoring and overwriting the cache                |
-| `--no-images`       | off                      | Disable image downloading and embedding                                  |
-| `--max-image-width` | `460`                    | Maximum image width in pixels                                            |
+| `--url`                | *(see below)*            | URL of an RSS or Atom feed                                               |
+| `--config`             | *(auto-discovered)*      | Path to a `feedbook.toml` config file                                    |
+| `--limit`              | *(all)*                  | Maximum number of articles to include (newest first)                     |
+| `--outfolder`          | current directory        | Directory where the output file is written                               |
+| `--dbpath`             | system local-data dir    | Path to the SQLite database file, or a directory (uses `feedbook.sql`)   |
+| `--kobo`               | off                      | Produce a Kobo KEPUB (`.kepub.epub`) instead of a standard EPUB          |
+| `--stdout`             | off                      | Print plain log lines instead of progress bars (for CI/CD)               |
+| `--force`              | off                      | Re-fetch all articles, ignoring and overwriting the cache                |
+| `--no-images`          | off                      | Disable image downloading and embedding                                  |
+| `--max-image-width`    | `460`                    | Maximum image width in pixels                                            |
+| `--content-selectors`  | *(Readability)*          | One or more CSS selectors whose matched elements form the article body   |
+| `--remove-selectors`   | *(none)*                 | One or more CSS selectors whose matched elements are stripped first       |
 
 ### Examples
 
@@ -41,6 +43,9 @@ feedbook --url https://example.com/feed.rss --stdout --dbpath /data --outfolder 
 
 # Force re-fetch, skip images
 feedbook --url https://example.com/feed.rss --force --no-images
+
+# Custom CSS selectors (bypasses Readability for sites where it struggles)
+feedbook --url https://example.com/feed.rss --content-selectors "article" ".post-body" --remove-selectors ".nav" ".sidebar"
 
 # Process all feeds defined in a config file
 feedbook
@@ -78,6 +83,25 @@ Cover ready
 Building EPUB (2 articles)...
 Written: hacker-news.epub
 ```
+
+### Custom content selectors
+
+By default feedbook uses the [Readability](https://github.com/mozilla/readability) algorithm to extract the main article body from each page. For sites where this produces poor results, you can take over with explicit CSS selectors:
+
+- **`--content-selectors`** — one or more selectors whose matched elements are concatenated to form the article body. When this flag is set, Readability is bypassed entirely.
+- **`--remove-selectors`** — selectors for elements to strip out *before* extraction (navigation, banners, comment sections, etc.). Applied only when `--content-selectors` is also set.
+
+If the content selectors match nothing on a given page, feedbook falls back to Readability automatically.
+
+Because the custom extraction path does not produce metadata, title, author, and date are always taken from the feed.
+
+```bash
+feedbook --url https://example.com/feed.rss \
+  --content-selectors "article.post" \
+  --remove-selectors ".post-footer" ".related-posts"
+```
+
+Both flags accept multiple space-separated values on the command line. In a config file, they are TOML string arrays (see [Per-feed keys](#per-feed-keys)).
 
 ---
 
@@ -132,16 +156,20 @@ When `--url` is given alongside a config file, only that feed is processed. If t
 
 | Key             | Type    | Description                                                    |
 |-----------------|---------|----------------------------------------------------------------|
-| `url`           | string  | *(required)* Feed URL                                          |
-| `name`          | string  | Override the feed's self-reported title                        |
-| `enabled`       | bool    | Set to `false` to skip this feed (default: `true`)             |
-| `limit`         | integer | Max articles                                                   |
-| `kobo`          | bool    | Produce KEPUB                                                  |
-| `no_images`     | bool    | Strip images                                                   |
-| `max_image_width` | integer | Resize wider images to this pixel width                      |
-| `force`         | bool    | Re-fetch even cached articles                                  |
-| `stdout`        | bool    | Plain log output                                               |
-| `outfolder`     | string  | Output directory (tilde-expanded, relative to config file)     |
+| Key                  | Type           | Description                                                    |
+|----------------------|----------------|----------------------------------------------------------------|
+| `url`                | string         | *(required)* Feed URL                                          |
+| `name`               | string         | Override the feed's self-reported title                        |
+| `enabled`            | bool           | Set to `false` to skip this feed (default: `true`)             |
+| `limit`              | integer        | Max articles                                                   |
+| `kobo`               | bool           | Produce KEPUB                                                  |
+| `no_images`          | bool           | Strip images                                                   |
+| `max_image_width`    | integer        | Resize wider images to this pixel width                        |
+| `force`              | bool           | Re-fetch even cached articles                                  |
+| `stdout`             | bool           | Plain log output                                               |
+| `outfolder`          | string         | Output directory (tilde-expanded, relative to config file)     |
+| `content_selectors`  | array of strings | CSS selectors for the article body; bypasses Readability when set |
+| `remove_selectors`   | array of strings | CSS selectors for elements to strip before extraction          |
 
 `dbpath` is only valid in `[defaults]`, not per feed.
 

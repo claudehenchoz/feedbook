@@ -154,47 +154,57 @@ async fn run_feed(
     let no_images = cfg.no_images;
     let max_w     = cfg.max_image_width;
     let stdout    = cfg.stdout;
+    let content_selectors: Option<Arc<Vec<String>>> =
+        cfg.content_selectors.as_ref().map(|v| Arc::new(v.clone()));
+    let remove_selectors: Option<Arc<Vec<String>>> =
+        cfg.remove_selectors.as_ref().map(|v| Arc::new(v.clone()));
 
     let t_pipeline = std::time::Instant::now();
     let (pipeline_result, cover_png) = tokio::join!(
 
         // ── Arm A: per-article scrape → per-article image download ────────────
         {
-            let client          = client.clone();
-            let host_times      = host_times.clone();
-            let image_sem       = image_sem.clone();
-            let seen_sha1s      = seen_sha1s.clone();
-            let sanitizer       = sanitizer.clone();
-            let article_pb      = article_pb.clone();
-            let image_pb        = image_pb.clone();
-            let article_fetched = article_fetched.clone();
-            let img_fetched     = img_fetched.clone();
-            let img_hits        = img_hits.clone();
+            let client              = client.clone();
+            let host_times          = host_times.clone();
+            let image_sem           = image_sem.clone();
+            let seen_sha1s          = seen_sha1s.clone();
+            let sanitizer           = sanitizer.clone();
+            let article_pb          = article_pb.clone();
+            let image_pb            = image_pb.clone();
+            let article_fetched     = article_fetched.clone();
+            let img_fetched         = img_fetched.clone();
+            let img_hits            = img_hits.clone();
+            let content_selectors   = content_selectors.clone();
+            let remove_selectors    = remove_selectors.clone();
             async move {
                 let results: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> =
                     futures::stream::iter(to_fetch)
                         .map({
-                            let client          = client.clone();
-                            let host_times      = host_times.clone();
-                            let image_sem       = image_sem.clone();
-                            let seen_sha1s      = seen_sha1s.clone();
-                            let sanitizer       = sanitizer.clone();
-                            let article_pb      = article_pb.clone();
-                            let image_pb        = image_pb.clone();
-                            let article_fetched = article_fetched.clone();
-                            let img_fetched     = img_fetched.clone();
-                            let img_hits        = img_hits.clone();
+                            let client              = client.clone();
+                            let host_times          = host_times.clone();
+                            let image_sem           = image_sem.clone();
+                            let seen_sha1s          = seen_sha1s.clone();
+                            let sanitizer           = sanitizer.clone();
+                            let article_pb          = article_pb.clone();
+                            let image_pb            = image_pb.clone();
+                            let article_fetched     = article_fetched.clone();
+                            let img_fetched         = img_fetched.clone();
+                            let img_hits            = img_hits.clone();
+                            let content_selectors   = content_selectors.clone();
+                            let remove_selectors    = remove_selectors.clone();
                             move |item| {
-                                let client          = client.clone();
-                                let host_times      = host_times.clone();
-                                let image_sem       = image_sem.clone();
-                                let seen_sha1s      = seen_sha1s.clone();
-                                let sanitizer       = sanitizer.clone();
-                                let article_pb      = article_pb.clone();
-                                let image_pb        = image_pb.clone();
-                                let article_fetched = article_fetched.clone();
-                                let img_fetched     = img_fetched.clone();
-                                let img_hits        = img_hits.clone();
+                                let client              = client.clone();
+                                let host_times          = host_times.clone();
+                                let image_sem           = image_sem.clone();
+                                let seen_sha1s          = seen_sha1s.clone();
+                                let sanitizer           = sanitizer.clone();
+                                let article_pb          = article_pb.clone();
+                                let image_pb            = image_pb.clone();
+                                let article_fetched     = article_fetched.clone();
+                                let img_fetched         = img_fetched.clone();
+                                let img_hits            = img_hits.clone();
+                                let content_selectors   = content_selectors.clone();
+                                let remove_selectors    = remove_selectors.clone();
                                 async move {
                                     let log = match article_pb.as_ref() {
                                         Some(pb) => LogSink::Bar(pb.clone()),
@@ -204,6 +214,7 @@ async fn run_feed(
                                     let item_url = item.url.clone();
                                     let maybe_article = scraper::scrape_article(
                                         &client, item, sanitizer, &host_times, log.clone(),
+                                        content_selectors, remove_selectors,
                                     ).await;
 
                                     if stdout {

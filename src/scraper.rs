@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use ammonia::Builder;
 use chrono::{DateTime, Utc};
+use dom_query::Document;
 use dom_smoothie::Readability;
 use crate::feed::FeedItem;
 use crate::log::LogSink;
@@ -32,6 +33,8 @@ pub async fn scrape_article(
     sanitizer: Arc<Builder<'static>>,
     times: &HostTimes,
     log: LogSink,
+    content_selectors: Option<Arc<Vec<String>>>,
+    remove_selectors: Option<Arc<Vec<String>>>,
 ) -> Option<ScrapedArticle> {
     let html = match crate::throttle::throttled_get(client, &item.url, times).await {
         Err(e) => {
@@ -46,6 +49,40 @@ pub async fn scrape_article(
             Ok(h) => h,
         },
     };
+
+    if let Some(content_sels) = content_selectors {
+        let remove_sels = remove_selectors;
+        let html_copy = html.clone();
+        let custom_html = tokio::task::spawn_blocking(move || {
+            let html = crate::images::sanitize_data_attrs(&html_copy);
+            let doc = Document::from(html.as_str());
+            if let Some(rm) = remove_sels {
+                for sel in rm.iter() {
+                    doc.select(sel).remove();
+                }
+            }
+            let mut extracted = String::new();
+            for sel in content_sels.iter() {
+                for node in doc.select(sel).iter() {
+                    extracted.push_str(&node.html().to_string());
+                    extracted.push('\n');
+                }
+            }
+            extracted
+        })
+        .await
+        .unwrap_or_default();
+
+        if !custom_html.is_empty() {
+            return Some(ScrapedArticle {
+                url:    item.url,
+                title:  item.title,
+                author: item.author,
+                date:   item.date,
+                html:   Some(sanitize_html(&sanitizer, &custom_html)),
+            });
+        }
+    }
 
     let url_str = item.url.clone();
 

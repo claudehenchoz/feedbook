@@ -42,4 +42,12 @@ pub struct Args {
     /// Directory where the output EPUB/KEPUB should be written (default: current dir)
     #[arg(long)]
     pub outfolder: Option<String>,
+
+    /// CSS selectors whose matching elements form the article body (bypasses Readability)
+    #[arg(long, num_args = 1..)]
+    pub content_selectors: Option<Vec<String>>,
+
+    /// CSS selectors whose matching elements are stripped before extraction
+    #[arg(long, num_args = 1..)]
+    pub remove_selectors: Option<Vec<String>>,
 }
