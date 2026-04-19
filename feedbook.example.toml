@@ -23,6 +23,7 @@ no_images       = false               # strip images by default?
 max_image_width = 460                 # resize wider images to this
 force           = false               # re-fetch even cached articles?
 stdout          = false               # plain log output instead of progress bars?
+report_times    = false               # print [TIMING] lines for each pipeline stage?
 
 # ============================================================
 # [[feeds]] — one entry per feed, processed in order.

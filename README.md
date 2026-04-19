@@ -22,6 +22,7 @@ feedbook [--url <feed-url>] [--config <path>] [options]
 | `--max-image-width`    | `460`                    | Maximum image width in pixels                                            |
 | `--content-selectors`  | *(Readability)*          | One or more CSS selectors whose matched elements form the article body   |
 | `--remove-selectors`   | *(none)*                 | One or more CSS selectors whose matched elements are stripped first       |
+| `--report-times`       | off                      | Print `[TIMING]` lines to stderr for each pipeline stage                 |
 
 ### Examples
 
@@ -170,6 +171,7 @@ When `--url` is given alongside a config file, only that feed is processed. If t
 | `outfolder`          | string         | Output directory (tilde-expanded, relative to config file)     |
 | `content_selectors`  | array of strings | CSS selectors for the article body; bypasses Readability when set |
 | `remove_selectors`   | array of strings | CSS selectors for elements to strip before extraction          |
+| `report_times`       | bool             | Print `[TIMING]` lines to stderr for each pipeline stage       |
 
 `dbpath` is only valid in `[defaults]`, not per feed.
 

@@ -48,9 +48,11 @@ async fn run_feed(
     let cached_urls: HashSet<String> = cache::get_cached_urls(conn, &cfg.url)?;
 
     // Fetch and parse feed
+    let report_times = cfg.report_times;
+
     let t = std::time::Instant::now();
     let feed_data = feed::fetch_feed(client, &cfg.url).await?;
-    eprintln!("[TIMING] feed fetch: {:?}", t.elapsed());
+    if report_times { eprintln!("[TIMING] feed fetch: {:?}", t.elapsed()); }
     // Apply name override: cfg.name replaces feed's self-reported title
     let feed_title = cfg.name.clone().unwrap_or(feed_data.title);
     let feed_date  = feed_data.date;
@@ -354,13 +356,13 @@ async fn run_feed(
                 if let Some(cached) = cover_from_cache {
                     if let Some(sp) = cover_sp { sp.finish_with_message("Cover cached"); }
                     else if stdout { eprintln!("Cover cached"); }
-                    eprintln!("[TIMING] cover: cached (skipped generation)");
+                    if report_times { eprintln!("[TIMING] cover: cached (skipped generation)"); }
                     return Some(cached);
                 }
 
                 let t_favicon = std::time::Instant::now();
                 let favicon = favicon_handle.await.ok().flatten();
-                eprintln!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed());
+                if report_times { eprintln!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed()); }
 
                 if let Some(ref sp) = cover_sp {
                     sp.set_message("Generating cover...");
@@ -375,7 +377,7 @@ async fn run_feed(
                 .await
                 .ok()
                 .and_then(|r| r.ok());
-                eprintln!("[TIMING] cover generate: {:?}", t_cover.elapsed());
+                if report_times { eprintln!("[TIMING] cover generate: {:?}", t_cover.elapsed()); }
 
                 if let Some(sp) = cover_sp {
                     sp.finish_with_message("Cover ready");
@@ -387,7 +389,7 @@ async fn run_feed(
         },
     );
 
-    eprintln!("[TIMING] pipeline (articles + cover, concurrent): {:?}", t_pipeline.elapsed());
+    if report_times { eprintln!("[TIMING] pipeline (articles + cover, concurrent): {:?}", t_pipeline.elapsed()); }
 
     // ── Store newly generated cover in cache ──────────────────────────────────
 
@@ -408,13 +410,13 @@ async fn run_feed(
         cache::insert_article(&*tx, &cfg.url, article)?;
     }
     tx.commit()?;
-    eprintln!("[TIMING] db inserts ({} articles): {:?}", pipeline_result.len(), t.elapsed());
+    if report_times { eprintln!("[TIMING] db inserts ({} articles): {:?}", pipeline_result.len(), t.elapsed()); }
 
     // ── Load from DB (respects limit) ────────────────────────────────────────
 
     let t = std::time::Instant::now();
     let all_articles = cache::load_articles(conn, &cfg.url, cfg.limit)?;
-    eprintln!("[TIMING] db load ({} articles): {:?}", all_articles.len(), t.elapsed());
+    if report_times { eprintln!("[TIMING] db load ({} articles): {:?}", all_articles.len(), t.elapsed()); }
 
     if all_articles.is_empty() {
         eprintln!("No articles found.");
@@ -474,8 +476,10 @@ async fn run_feed(
     .map_err(|e| AppError::Other(format!("EPUB task panicked: {e}")))?;
 
     epub_result?;
-    eprintln!("[TIMING] epub build: {:?}", t.elapsed());
-    eprintln!("[TIMING] total: {:?}", t_start.elapsed());
+    if report_times {
+        eprintln!("[TIMING] epub build: {:?}", t.elapsed());
+        eprintln!("[TIMING] total: {:?}", t_start.elapsed());
+    }
 
     if let Some(sp) = epub_sp {
         sp.finish_with_message(format!("Written: {}", output_display));

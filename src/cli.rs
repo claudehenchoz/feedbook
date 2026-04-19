@@ -50,4 +50,8 @@ pub struct Args {
     /// CSS selectors whose matching elements are stripped before extraction
     #[arg(long, num_args = 1..)]
     pub remove_selectors: Option<Vec<String>>,
+
+    /// Print timing information for each pipeline stage
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub report_times: Option<bool>,
 }

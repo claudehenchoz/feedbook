@@ -16,6 +16,7 @@ pub struct RawDefaults {
     pub stdout:            Option<bool>,
     pub content_selectors: Option<Vec<String>>,
     pub remove_selectors:  Option<Vec<String>>,
+    pub report_times:      Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -33,6 +34,7 @@ pub struct RawFeed {
     pub outfolder:         Option<String>,
     pub content_selectors: Option<Vec<String>>,
     pub remove_selectors:  Option<Vec<String>>,
+    pub report_times:      Option<bool>,
     // dbpath intentionally absent — deny_unknown_fields rejects it with a clear error
 }
 
@@ -51,6 +53,7 @@ impl RawFeed {
             outfolder: None,
             content_selectors: None,
             remove_selectors: None,
+            report_times: None,
         }
     }
 }
@@ -76,6 +79,7 @@ pub struct ResolvedFeedConfig {
     pub outfolder:         Option<String>,
     pub content_selectors: Option<Vec<String>>,
     pub remove_selectors:  Option<Vec<String>>,
+    pub report_times:      bool,
 }
 
 pub fn resolve_path(raw: &str, config_dir: &Path) -> PathBuf {
@@ -111,6 +115,7 @@ pub fn merge(cli: &Args, defaults: &RawDefaults, feed: &RawFeed, config_dir: &Pa
         remove_selectors:  cli.remove_selectors.clone()
                                .or_else(|| feed.remove_selectors.clone())
                                .or_else(|| defaults.remove_selectors.clone()),
+        report_times:      cli.report_times.or(feed.report_times).or(defaults.report_times).unwrap_or(false),
     }
 }
 
