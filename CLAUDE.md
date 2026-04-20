@@ -14,9 +14,10 @@ cargo run -- --url <feed-url> [--limit <n>]
 
 # Check (faster than build, no codegen)
 cargo check
-```
 
-There are no tests at this time.
+# Test
+cargo test
+```
 
 ## Architecture
 

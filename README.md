@@ -196,6 +196,12 @@ cargo build --release
 
 The binary lands at `target/release/feedbook` (or `feedbook.exe` on Windows).
 
+### Test
+
+```bash
+cargo test
+```
+
 ### Build for Kobo
 
 ```bash
