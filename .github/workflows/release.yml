@@ -80,6 +80,9 @@ jobs:
       - name: Build feedbook for Windows
         run: cargo build --release
 
+      - name: Install zip
+        run: choco install zip -y
+
       - name: Assemble install kit
         shell: bash
         run: |
