@@ -32,6 +32,10 @@ png = "0.18.1"
 oxipng = { version = "9", default-features = false, features = ["parallel"] }
 bytemuck = "1"
 
+[dev-dependencies]
+httpmock = "0.7"
+tempfile = "3"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

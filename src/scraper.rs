@@ -27,6 +27,103 @@ fn parse_date(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use httpmock::prelude::*;
+    use crate::sanitize::build_sanitizer;
+    use crate::throttle::new_host_times;
+
+    // ── parse_date ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_date_rfc3339() {
+        let dt = parse_date("2024-01-15T12:00:00Z").unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2024-01-15");
+    }
+
+    #[test]
+    fn parse_date_rfc2822() {
+        let dt = parse_date("Mon, 15 Jan 2024 12:00:00 +0000").unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2024-01-15");
+    }
+
+    #[test]
+    fn parse_date_invalid_returns_none() {
+        assert!(parse_date("not a date").is_none());
+        assert!(parse_date("").is_none());
+        assert!(parse_date("2024-99-99").is_none());
+    }
+
+    // ── scrape_article ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn scrape_article_caches_url_on_http_error_status() {
+        // HTTP 500 is not a network error: reqwest returns Ok(resp) with status 500.
+        // scrape_article should still return Some so the URL is cached and not
+        // re-fetched on every run; the article will have no html content.
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/article");
+            then.status(500);
+        });
+        let client = reqwest::Client::new();
+        let sanitizer = build_sanitizer();
+        let times = new_host_times();
+        let item = crate::feed::FeedItem {
+            url: server.url("/article"),
+            title: Some("Test".to_string()),
+            author: None,
+            date: None,
+        };
+        let result = scrape_article(
+            &client, item, sanitizer, &times,
+            LogSink::Stderr, None, None,
+        ).await;
+        assert!(result.is_some(), "URL should be cached even on HTTP error status");
+        assert!(result.unwrap().html.is_none(), "html should be empty on failed extraction");
+    }
+
+    #[tokio::test]
+    async fn scrape_article_returns_some_on_success() {
+        let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Test Article</title></head>
+<body>
+<article>
+<h1>Test Article Title</h1>
+<p>This is the article content. It has enough text to pass the Readability threshold for extraction. More text here to ensure it is long enough to be considered readable content by the algorithm.</p>
+</article>
+</body>
+</html>"#;
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/article");
+            then.status(200)
+                .header("content-type", "text/html")
+                .body(html);
+        });
+        let client = reqwest::Client::new();
+        let sanitizer = build_sanitizer();
+        let times = new_host_times();
+        let item = crate::feed::FeedItem {
+            url: server.url("/article"),
+            title: Some("Test Article Title".to_string()),
+            author: None,
+            date: None,
+        };
+        let result = scrape_article(
+            &client, item, sanitizer, &times,
+            LogSink::Stderr, None, None,
+        ).await;
+        // Should return Some regardless of whether readability extraction succeeded —
+        // the URL is always cached even on readability failure.
+        assert!(result.is_some());
+        let article = result.unwrap();
+        assert!(!article.url.is_empty());
+    }
+}
+
 pub async fn scrape_article(
     client: &reqwest::Client,
     item: FeedItem,

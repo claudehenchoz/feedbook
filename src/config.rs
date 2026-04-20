@@ -146,6 +146,132 @@ pub fn load_config(cli_config_path: Option<&str>) -> Result<Option<(RawConfig, P
     Ok(Some((raw, path)))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Args;
+
+    fn blank_args() -> Args {
+        Args {
+            url: None,
+            config: None,
+            limit: None,
+            force: None,
+            no_images: None,
+            max_image_width: None,
+            dbpath: None,
+            stdout: None,
+            kobo: None,
+            outfolder: None,
+            content_selectors: None,
+            remove_selectors: None,
+            report_times: None,
+        }
+    }
+
+    fn blank_defaults() -> RawDefaults {
+        RawDefaults::default()
+    }
+
+    fn make_feed(url: &str) -> RawFeed {
+        RawFeed::ad_hoc(url.to_string())
+    }
+
+    // ── resolve_path ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_path_tilde_expands_to_home() {
+        let config_dir = Path::new("/tmp");
+        let result = resolve_path("~/documents/db.sql", config_dir);
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        assert_eq!(result, home.join("documents/db.sql"));
+    }
+
+    #[test]
+    fn resolve_path_absolute_returned_as_is() {
+        let config_dir = Path::new("/tmp/config");
+        let abs = if cfg!(windows) { "C:\\data\\db.sql" } else { "/data/db.sql" };
+        let result = resolve_path(abs, config_dir);
+        assert_eq!(result, PathBuf::from(abs));
+    }
+
+    #[test]
+    fn resolve_path_relative_joined_to_config_dir() {
+        let config_dir = Path::new("/tmp/config");
+        let result = resolve_path("db.sql", config_dir);
+        assert_eq!(result, PathBuf::from("/tmp/config/db.sql"));
+    }
+
+    // ── merge ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_cli_wins_over_feed_and_defaults() {
+        let mut cli = blank_args();
+        cli.limit = Some(1);
+        let mut feed = make_feed("https://example.com/feed");
+        feed.limit = Some(5);
+        let mut defaults = blank_defaults();
+        defaults.limit = Some(10);
+        let cfg = merge(&cli, &defaults, &feed, Path::new("."));
+        assert_eq!(cfg.limit, Some(1));
+    }
+
+    #[test]
+    fn merge_feed_wins_over_defaults_when_no_cli() {
+        let cli = blank_args();
+        let mut feed = make_feed("https://example.com/feed");
+        feed.limit = Some(5);
+        let mut defaults = blank_defaults();
+        defaults.limit = Some(10);
+        let cfg = merge(&cli, &defaults, &feed, Path::new("."));
+        assert_eq!(cfg.limit, Some(5));
+    }
+
+    #[test]
+    fn merge_fallback_defaults_when_all_none() {
+        let cli = blank_args();
+        let defaults = blank_defaults();
+        let feed = make_feed("https://example.com/feed");
+        let cfg = merge(&cli, &defaults, &feed, Path::new("."));
+        assert!(!cfg.force);
+        assert!(!cfg.no_images);
+        assert_eq!(cfg.max_image_width, 460);
+        assert!(!cfg.kobo);
+        assert!(!cfg.stdout);
+        assert!(!cfg.report_times);
+        assert!(cfg.limit.is_none());
+    }
+
+    #[test]
+    fn merge_content_selectors_propagated_from_feed() {
+        let cli = blank_args();
+        let defaults = blank_defaults();
+        let mut feed = make_feed("https://example.com/feed");
+        feed.content_selectors = Some(vec!["div.article-body".to_string()]);
+        let cfg = merge(&cli, &defaults, &feed, Path::new("."));
+        assert_eq!(cfg.content_selectors, Some(vec!["div.article-body".to_string()]));
+    }
+
+    #[test]
+    fn merge_kobo_flag_from_defaults() {
+        let cli = blank_args();
+        let mut defaults = blank_defaults();
+        defaults.kobo = Some(true);
+        let feed = make_feed("https://example.com/feed");
+        let cfg = merge(&cli, &defaults, &feed, Path::new("."));
+        assert!(cfg.kobo);
+    }
+
+    #[test]
+    fn merge_feed_url_preserved() {
+        let cli = blank_args();
+        let defaults = blank_defaults();
+        let feed = make_feed("https://example.com/rss");
+        let cfg = merge(&cli, &defaults, &feed, Path::new("."));
+        assert_eq!(cfg.url, "https://example.com/rss");
+    }
+}
+
 fn config_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 

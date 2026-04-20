@@ -90,8 +90,10 @@ fn inject_kobo_spans(xhtml: &str, chapter: usize) -> String {
 
         // Update in_head state based on tag name
         let tag_inner = tag.trim_start_matches('<').trim_end_matches('>').trim();
+        // Split on whitespace only (not '/') so that closing tags like
+        // "</head>" produce tag_name_lower = "/head", not "".
         let tag_name_lower = tag_inner
-            .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+            .split(|c: char| c.is_whitespace() || c == '>')
             .next()
             .unwrap_or("")
             .to_lowercase();
@@ -209,6 +211,125 @@ fn build_chapter_xhtml(
         html_body = html_body,
     );
     if kobo { inject_kobo_spans(&xhtml, chapter_num) } else { xhtml }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_article(url: &str, title: &str) -> ScrapedArticle {
+        ScrapedArticle {
+            url: url.to_string(),
+            title: Some(title.to_string()),
+            author: Some("Test Author".to_string()),
+            date: Some(chrono::DateTime::parse_from_rfc3339("2024-01-15T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)),
+            html: Some("<p>Article body content.</p>".to_string()),
+        }
+    }
+
+    // ── derive_output_path ────────────────────────────────────────────────────
+
+    #[test]
+    fn derive_output_path_simple() {
+        let path = derive_output_path("My Feed", false);
+        assert_eq!(path, PathBuf::from("my-feed.epub"));
+    }
+
+    #[test]
+    fn derive_output_path_kobo() {
+        let path = derive_output_path("My Feed", true);
+        assert_eq!(path, PathBuf::from("my-feed.kepub.epub"));
+    }
+
+    #[test]
+    fn derive_output_path_collapses_separators() {
+        let path = derive_output_path("Hello -- World", false);
+        assert_eq!(path, PathBuf::from("hello-world.epub"));
+    }
+
+    #[test]
+    fn derive_output_path_empty_title_uses_feed() {
+        let path = derive_output_path("", false);
+        assert_eq!(path, PathBuf::from("feed.epub"));
+    }
+
+    #[test]
+    fn derive_output_path_special_chars_stripped() {
+        let path = derive_output_path("Tech & Science!", false);
+        assert_eq!(path, PathBuf::from("tech-science.epub"));
+    }
+
+    // ── escape_html ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn escape_html_ampersand() {
+        assert_eq!(escape_html("a & b"), "a &amp; b");
+    }
+
+    #[test]
+    fn escape_html_all_specials() {
+        assert_eq!(escape_html(r#"<a href="x">&</a>"#), "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;");
+    }
+
+    // ── inject_kobo_spans ─────────────────────────────────────────────────────
+
+    #[test]
+    fn inject_kobo_spans_wraps_body_text() {
+        let xhtml = r#"<html><head><title>T</title></head><body><p>Hello world</p></body></html>"#;
+        let result = inject_kobo_spans(xhtml, 1);
+        assert!(result.contains("koboSpan"), "got: {}", result);
+        assert!(result.contains("kobo.1."), "got: {}", result);
+    }
+
+    #[test]
+    fn inject_kobo_spans_head_unchanged() {
+        let xhtml = r#"<html><head><title>My Title</title></head><body><p>body</p></body></html>"#;
+        let result = inject_kobo_spans(xhtml, 1);
+        // The title in <head> must NOT be wrapped in koboSpan
+        let head_end = result.find("</head>").unwrap();
+        let head = &result[..head_end];
+        assert!(!head.contains("koboSpan"), "head section has koboSpan: {}", head);
+    }
+
+    // ── build_chapter_xhtml ───────────────────────────────────────────────────
+
+    #[test]
+    fn build_chapter_xhtml_structure() {
+        let article = make_article("https://example.com/article", "Test Article");
+        let images = HashMap::new();
+        let xhtml = build_chapter_xhtml(&article, &images, 1, false);
+        assert!(xhtml.contains("<html"), "missing html tag");
+        assert!(xhtml.contains("<head>") || xhtml.contains("<head\n") || xhtml.contains("<head "), "missing head");
+        assert!(xhtml.contains("<body>") || xhtml.contains("<body\n"), "missing body");
+        assert!(xhtml.contains("article-header"), "missing article-header");
+        assert!(xhtml.contains("Test Article"), "missing title");
+        assert!(xhtml.contains("Test Author"), "missing author");
+    }
+
+    // ── build_epub ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_epub_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("test.epub");
+        let articles = vec![make_article("https://example.com/1", "Article One")];
+        let result = build_epub("Test Feed", &articles, &HashMap::new(), None, &output, false);
+        assert!(result.is_ok(), "build_epub failed: {:?}", result);
+        assert!(output.exists(), "EPUB file was not created");
+        assert!(output.metadata().unwrap().len() > 0, "EPUB file is empty");
+    }
+
+    #[test]
+    fn build_epub_with_kobo_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("test.kepub.epub");
+        let articles = vec![make_article("https://example.com/1", "Kobo Article")];
+        let result = build_epub("Kobo Feed", &articles, &HashMap::new(), None, &output, true);
+        assert!(result.is_ok(), "build_epub kobo failed: {:?}", result);
+        assert!(output.exists());
+    }
 }
 
 pub fn build_epub(

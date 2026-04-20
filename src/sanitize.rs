@@ -427,3 +427,141 @@ fn named_to_numeric(name: &str) -> Option<&'static str> {
         _ => None, // unknown entity — leave as-is
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── named_to_numeric ──────────────────────────────────────────────────────
+
+    #[test]
+    fn named_to_numeric_nbsp() {
+        assert_eq!(named_to_numeric("nbsp"), Some("&#160;"));
+    }
+
+    #[test]
+    fn named_to_numeric_euro() {
+        assert_eq!(named_to_numeric("euro"), Some("&#8364;"));
+    }
+
+    #[test]
+    fn named_to_numeric_copy() {
+        assert_eq!(named_to_numeric("copy"), Some("&#169;"));
+    }
+
+    #[test]
+    fn named_to_numeric_xml_predefined_returns_none() {
+        // XML predefined entities must not be converted
+        for name in &["amp", "lt", "gt", "quot", "apos"] {
+            assert_eq!(named_to_numeric(name), None, "expected None for &{};", name);
+        }
+    }
+
+    #[test]
+    fn named_to_numeric_unknown_returns_none() {
+        assert_eq!(named_to_numeric("zzzznotanentity"), None);
+    }
+
+    // ── fixup_xhtml ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn fixup_xhtml_self_closes_br() {
+        let result = fixup_xhtml("<p>line one<br>line two</p>");
+        assert!(result.contains("<br />"), "got: {}", result);
+        assert!(!result.contains("<br>"));
+    }
+
+    #[test]
+    fn fixup_xhtml_self_closes_img() {
+        let result = fixup_xhtml(r#"<img src="x.jpg" alt="x">"#);
+        assert!(result.contains("/>"), "got: {}", result);
+    }
+
+    #[test]
+    fn fixup_xhtml_already_self_closed_unchanged() {
+        let input = "<br />";
+        let result = fixup_xhtml(input);
+        // Should still be self-closed, not doubled
+        assert!(result.contains("<br />"));
+        assert!(!result.contains("<br />/>"));
+    }
+
+    #[test]
+    fn fixup_xhtml_converts_named_entity_nbsp() {
+        let result = fixup_xhtml("<p>hello&nbsp;world</p>");
+        assert!(result.contains("&#160;"), "got: {}", result);
+        assert!(!result.contains("&nbsp;"));
+    }
+
+    #[test]
+    fn fixup_xhtml_leaves_xml_predefined_entities() {
+        let result = fixup_xhtml("<p>a &amp; b &lt; c &gt; d</p>");
+        assert!(result.contains("&amp;"));
+        assert!(result.contains("&lt;"));
+        assert!(result.contains("&gt;"));
+    }
+
+    #[test]
+    fn fixup_xhtml_tt_to_code() {
+        let result = fixup_xhtml("<p><tt>monospace</tt></p>");
+        assert!(result.contains("<code>monospace</code>"), "got: {}", result);
+        assert!(!result.contains("<tt>"));
+    }
+
+    #[test]
+    fn fixup_xhtml_strips_fragment_only_href() {
+        let result = fixup_xhtml(r##"<a href="#section">link</a>"##);
+        assert!(!result.contains("href="), "got: {}", result);
+        assert!(result.contains("<a>link</a>") || result.contains("<a "), "got: {}", result);
+    }
+
+    #[test]
+    fn fixup_xhtml_preserves_full_href() {
+        let result = fixup_xhtml(r##"<a href="https://example.com">link</a>"##);
+        assert!(result.contains("href=\"https://example.com\""), "got: {}", result);
+    }
+
+    // ── sanitize_html ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_html_removes_script() {
+        let sanitizer = build_sanitizer();
+        let result = sanitize_html(&sanitizer, "<p>hello</p><script>alert('xss')</script>");
+        assert!(!result.contains("<script>"), "got: {}", result);
+        assert!(!result.contains("alert"), "got: {}", result);
+        assert!(result.contains("<p>hello</p>"));
+    }
+
+    #[test]
+    fn sanitize_html_removes_style_tag() {
+        let sanitizer = build_sanitizer();
+        let result = sanitize_html(&sanitizer, "<style>body{color:red}</style><p>text</p>");
+        assert!(!result.contains("<style>"), "got: {}", result);
+        assert!(result.contains("<p>text</p>"));
+    }
+
+    #[test]
+    fn sanitize_html_strips_javascript_href() {
+        let sanitizer = build_sanitizer();
+        let result = sanitize_html(&sanitizer, r#"<a href="javascript:void(0)">click</a>"#);
+        assert!(!result.contains("javascript:"), "got: {}", result);
+    }
+
+    #[test]
+    fn sanitize_html_allows_basic_markup() {
+        let sanitizer = build_sanitizer();
+        let input = r#"<p>Hello <strong>world</strong></p><a href="https://example.com">link</a>"#;
+        let result = sanitize_html(&sanitizer, input);
+        assert!(result.contains("<p>"), "got: {}", result);
+        assert!(result.contains("<strong>"), "got: {}", result);
+        assert!(result.contains("href=\"https://example.com\""), "got: {}", result);
+    }
+
+    #[test]
+    fn sanitize_html_strips_inline_style_attr() {
+        let sanitizer = build_sanitizer();
+        let result = sanitize_html(&sanitizer, r#"<p style="color:red">text</p>"#);
+        assert!(!result.contains("style="), "got: {}", result);
+        assert!(result.contains("<p>text</p>"));
+    }
+}

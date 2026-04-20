@@ -153,6 +153,96 @@ async fn try_favicon_from_base(client: &reqwest::Client, base: &url::Url) -> Opt
 /// "feeds.arstechnica.com" → "arstechnica.com"
 /// "www.bbc.co.uk"         → "bbc.co.uk"
 /// "example.com"           → "example.com"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── extract_domain_title ──────────────────────────────────────────────────
+
+    #[test]
+    fn extract_domain_title_www_prefix() {
+        assert_eq!(extract_domain_title("https://www.example.com/"), "example");
+    }
+
+    #[test]
+    fn extract_domain_title_subdomain() {
+        assert_eq!(extract_domain_title("https://news.ycombinator.com/"), "ycombinator");
+    }
+
+    #[test]
+    fn extract_domain_title_bare_domain() {
+        assert_eq!(extract_domain_title("https://example.com/some/path"), "example");
+    }
+
+    #[test]
+    fn extract_domain_title_invalid_url_returns_feed() {
+        assert_eq!(extract_domain_title("not-a-url"), "feed");
+    }
+
+    // ── reduce_to_apex ────────────────────────────────────────────────────────
+
+    #[test]
+    fn reduce_to_apex_strips_www() {
+        assert_eq!(reduce_to_apex("www.example.com"), "example.com");
+    }
+
+    #[test]
+    fn reduce_to_apex_multi_part_tld_co_uk() {
+        assert_eq!(reduce_to_apex("www.bbc.co.uk"), "bbc.co.uk");
+    }
+
+    #[test]
+    fn reduce_to_apex_already_apex() {
+        assert_eq!(reduce_to_apex("example.com"), "example.com");
+    }
+
+    // ── looks_like_image ──────────────────────────────────────────────────────
+
+    #[test]
+    fn looks_like_image_png() {
+        let png_magic = [0x89u8, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n', 0, 0, 0, 0];
+        assert!(looks_like_image(&png_magic));
+    }
+
+    #[test]
+    fn looks_like_image_jpeg() {
+        let jpeg_magic = [0xFFu8, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0];
+        assert!(looks_like_image(&jpeg_magic));
+    }
+
+    #[test]
+    fn looks_like_image_html_returns_false() {
+        let html = b"<!DOCTYPE html><html>";
+        assert!(!looks_like_image(html));
+    }
+
+    #[test]
+    fn looks_like_image_too_short_returns_false() {
+        assert!(!looks_like_image(&[0xFF, 0xD8]));
+    }
+
+    // ── generate_cover ────────────────────────────────────────────────────────
+
+    #[test]
+    fn generate_cover_returns_valid_png() {
+        let result = generate_cover("Test Feed", None, None);
+        assert!(result.is_ok(), "generate_cover failed: {:?}", result);
+        let bytes = result.unwrap();
+        // PNG magic number: 89 50 4E 47 0D 0A 1A 0A
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
+        assert!(bytes.len() > 1000, "cover PNG suspiciously small");
+    }
+
+    #[test]
+    fn generate_cover_with_date_succeeds() {
+        let date = chrono::DateTime::parse_from_rfc3339("2024-06-15T08:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = generate_cover("My Feed", Some(date), None);
+        assert!(result.is_ok());
+    }
+}
+
 fn reduce_to_apex(host: &str) -> &str {
     const MULTI_PART_TLDS: &[&str] = &[
         ".co.uk", ".co.jp", ".co.kr", ".co.nz", ".co.za",

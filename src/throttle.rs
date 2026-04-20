@@ -48,3 +48,68 @@ pub async fn throttled_get(
 
     client.get(url).send().await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use httpmock::prelude::*;
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
+    #[tokio::test]
+    async fn throttled_get_returns_ok_response() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/resource");
+            then.status(200).body("ok");
+        });
+        let client = test_client();
+        let times = new_host_times();
+        let resp = throttled_get(&client, &server.url("/resource"), &times)
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn throttled_get_enforces_200ms_gap_same_host() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/resource");
+            then.status(200).body("ok");
+        });
+        let client = test_client();
+        let times = new_host_times();
+        let url = server.url("/resource");
+
+        let start = Instant::now();
+        throttled_get(&client, &url, &times).await.unwrap();
+        throttled_get(&client, &url, &times).await.unwrap();
+        let elapsed = start.elapsed();
+
+        // Two requests to the same host must be at least THROTTLE_MS apart.
+        assert!(
+            elapsed.as_millis() >= THROTTLE_MS as u128,
+            "elapsed {}ms < {}ms throttle",
+            elapsed.as_millis(),
+            THROTTLE_MS
+        );
+    }
+
+    #[tokio::test]
+    async fn throttled_get_populates_host_times_map() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/resource");
+            then.status(200).body("ok");
+        });
+        let client = test_client();
+        let times = new_host_times();
+        assert!(times.lock().await.is_empty());
+        throttled_get(&client, &server.url("/resource"), &times).await.unwrap();
+        assert!(!times.lock().await.is_empty(), "host_times should be populated after a request");
+    }
+}

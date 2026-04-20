@@ -211,3 +211,224 @@ pub fn store_cover(conn: &Connection, key: &str, data: &[u8]) -> Result<(), AppE
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_db() -> Connection {
+        open_db(&PathBuf::from(":memory:")).unwrap()
+    }
+
+    fn make_article(url: &str) -> ScrapedArticle {
+        ScrapedArticle {
+            url: url.to_string(),
+            title: Some(format!("Title for {}", url)),
+            author: Some("Author".to_string()),
+            date: Some(chrono::DateTime::parse_from_rfc3339("2024-01-15T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)),
+            html: Some("<p>body</p>".to_string()),
+        }
+    }
+
+    fn make_image(sha1: &str, url: &str) -> ProcessedImage {
+        ProcessedImage {
+            url_sha1: sha1.to_string(),
+            original_url: url.to_string(),
+            filename: format!("images/{}.jpeg", sha1),
+            data: vec![0xFFu8, 0xD8, 0xFF], // minimal JPEG header bytes
+        }
+    }
+
+    #[test]
+    fn open_db_creates_tables() {
+        let conn = mem_db();
+        // Verify all three tables exist by counting rows (would fail if tables are missing)
+        let articles: i64 = conn
+            .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
+            .unwrap();
+        let images: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))
+            .unwrap();
+        let covers: i64 = conn
+            .query_row("SELECT COUNT(*) FROM covers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(articles, 0);
+        assert_eq!(images, 0);
+        assert_eq!(covers, 0);
+    }
+
+    #[test]
+    fn insert_and_get_cached_urls() {
+        let conn = mem_db();
+        let feed = "https://example.com/feed";
+        let article = make_article("https://example.com/a1");
+        insert_article(&conn, feed, &article).unwrap();
+        let urls = get_cached_urls(&conn, feed).unwrap();
+        assert!(urls.contains("https://example.com/a1"));
+        assert_eq!(urls.len(), 1);
+    }
+
+    #[test]
+    fn get_cached_urls_only_for_feed() {
+        let conn = mem_db();
+        insert_article(&conn, "https://feed-a.com/", &make_article("https://feed-a.com/a1")).unwrap();
+        insert_article(&conn, "https://feed-b.com/", &make_article("https://feed-b.com/b1")).unwrap();
+        let urls_a = get_cached_urls(&conn, "https://feed-a.com/").unwrap();
+        assert!(urls_a.contains("https://feed-a.com/a1"));
+        assert!(!urls_a.contains("https://feed-b.com/b1"));
+    }
+
+    #[test]
+    fn load_articles_empty() {
+        let conn = mem_db();
+        let articles = load_articles(&conn, "https://example.com/feed", None).unwrap();
+        assert!(articles.is_empty());
+    }
+
+    #[test]
+    fn load_articles_with_limit() {
+        let conn = mem_db();
+        let feed = "https://example.com/feed";
+        for i in 0..5 {
+            insert_article(&conn, feed, &make_article(&format!("https://example.com/{}", i))).unwrap();
+        }
+        let articles = load_articles(&conn, feed, Some(3)).unwrap();
+        assert_eq!(articles.len(), 3);
+    }
+
+    #[test]
+    fn load_articles_ordered_by_date_desc() {
+        let conn = mem_db();
+        let feed = "https://example.com/feed";
+        let mut older = make_article("https://example.com/older");
+        older.date = Some(chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap().with_timezone(&Utc));
+        let mut newer = make_article("https://example.com/newer");
+        newer.date = Some(chrono::DateTime::parse_from_rfc3339("2024-06-01T00:00:00Z")
+            .unwrap().with_timezone(&Utc));
+        insert_article(&conn, feed, &older).unwrap();
+        insert_article(&conn, feed, &newer).unwrap();
+        let articles = load_articles(&conn, feed, None).unwrap();
+        assert_eq!(articles[0].url, "https://example.com/newer");
+        assert_eq!(articles[1].url, "https://example.com/older");
+    }
+
+    #[test]
+    fn insert_or_replace_updates_title() {
+        let conn = mem_db();
+        let feed = "https://example.com/feed";
+        let mut article = make_article("https://example.com/a1");
+        article.title = Some("Original".to_string());
+        insert_article(&conn, feed, &article).unwrap();
+        article.title = Some("Updated".to_string());
+        insert_article(&conn, feed, &article).unwrap();
+        let articles = load_articles(&conn, feed, None).unwrap();
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].title.as_deref(), Some("Updated"));
+    }
+
+    #[test]
+    fn prune_by_count_keeps_500() {
+        let conn = mem_db();
+        let feed = "https://example.com/feed";
+        for i in 0..505usize {
+            insert_article(&conn, feed, &make_article(&format!("https://example.com/{}", i))).unwrap();
+        }
+        prune(&conn, feed).unwrap();
+        let articles = load_articles(&conn, feed, None).unwrap();
+        assert_eq!(articles.len(), 500);
+    }
+
+    #[test]
+    fn prune_by_age_removes_old() {
+        let conn = mem_db();
+        let feed = "https://example.com/feed";
+        let url = "https://example.com/old";
+        insert_article(&conn, feed, &make_article(url)).unwrap();
+        // Backdate the article so it appears >90 days old
+        conn.execute("UPDATE articles SET fetched_at = 0 WHERE article_url = ?1", params![url]).unwrap();
+        prune(&conn, feed).unwrap();
+        let urls = get_cached_urls(&conn, feed).unwrap();
+        assert!(!urls.contains(url));
+    }
+
+    #[test]
+    fn prune_covers_by_age() {
+        let conn = mem_db();
+        store_cover(&conn, "old-cover", b"data").unwrap();
+        conn.execute("UPDATE covers SET created_at = 0 WHERE cache_key = 'old-cover'", []).unwrap();
+        prune(&conn, "https://example.com/feed").unwrap();
+        let result = get_cached_cover(&conn, "old-cover").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn insert_and_load_images() {
+        let conn = mem_db();
+        let img1 = make_image("aaa111", "https://example.com/img1.jpg");
+        let img2 = make_image("bbb222", "https://example.com/img2.jpg");
+        insert_image(&conn, &img1).unwrap();
+        insert_image(&conn, &img2).unwrap();
+        let sha1s = vec!["aaa111".to_string(), "bbb222".to_string()];
+        let loaded = load_images(&conn, &sha1s).unwrap();
+        assert_eq!(loaded.len(), 2);
+    }
+
+    #[test]
+    fn insert_image_ignores_duplicate() {
+        let conn = mem_db();
+        let img = make_image("abc123", "https://example.com/img.jpg");
+        insert_image(&conn, &img).unwrap();
+        insert_image(&conn, &img).unwrap(); // second insert should be no-op
+        let sha1s = vec!["abc123".to_string()];
+        let loaded = load_images(&conn, &sha1s).unwrap();
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn prune_images_by_age() {
+        let conn = mem_db();
+        let img = make_image("old123", "https://example.com/old.jpg");
+        insert_image(&conn, &img).unwrap();
+        conn.execute("UPDATE images SET fetched_at = 0 WHERE url_sha1 = 'old123'", []).unwrap();
+        prune_images(&conn).unwrap();
+        let sha1s = get_cached_image_sha1s(&conn).unwrap();
+        assert!(!sha1s.contains("old123"));
+    }
+
+    #[test]
+    fn get_cached_image_sha1s_returns_all() {
+        let conn = mem_db();
+        insert_image(&conn, &make_image("sha1a", "https://example.com/a.jpg")).unwrap();
+        insert_image(&conn, &make_image("sha1b", "https://example.com/b.jpg")).unwrap();
+        let sha1s = get_cached_image_sha1s(&conn).unwrap();
+        assert!(sha1s.contains("sha1a"));
+        assert!(sha1s.contains("sha1b"));
+        assert_eq!(sha1s.len(), 2);
+    }
+
+    #[test]
+    fn store_and_get_cover() {
+        let conn = mem_db();
+        let data = b"PNG_DATA_HERE";
+        store_cover(&conn, "my-cover", data).unwrap();
+        let result = get_cached_cover(&conn, "my-cover").unwrap();
+        assert_eq!(result.as_deref(), Some(data.as_ref()));
+    }
+
+    #[test]
+    fn get_cover_missing_returns_none() {
+        let conn = mem_db();
+        let result = get_cached_cover(&conn, "nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_images_empty_sha1s_returns_empty() {
+        let conn = mem_db();
+        let result = load_images(&conn, &[]).unwrap();
+        assert!(result.is_empty());
+    }
+}

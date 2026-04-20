@@ -250,6 +250,168 @@ fn is_svg(bytes: &[u8], url: &str) -> bool {
     prefix_str.contains("<svg") || (prefix_str.contains("<?xml") && prefix_str.contains("<svg"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn url_sha1_deterministic() {
+        let h1 = url_sha1("https://example.com/image.jpg");
+        let h2 = url_sha1("https://example.com/image.jpg");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 40); // SHA1 hex is always 40 chars
+    }
+
+    #[test]
+    fn url_sha1_different_urls_produce_different_hashes() {
+        let h1 = url_sha1("https://example.com/a.jpg");
+        let h2 = url_sha1("https://example.com/b.jpg");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn decode_html_entities_amp() {
+        assert_eq!(decode_html_entities("a&amp;b"), "a&b");
+    }
+
+    #[test]
+    fn decode_html_entities_lt_gt() {
+        assert_eq!(decode_html_entities("&lt;div&gt;"), "<div>");
+    }
+
+    #[test]
+    fn decode_html_entities_quotes() {
+        assert_eq!(decode_html_entities("&quot;"), "\"");
+        assert_eq!(decode_html_entities("&apos;"), "'");
+        assert_eq!(decode_html_entities("&#39;"), "'");
+    }
+
+    #[test]
+    fn decode_html_entities_mixed() {
+        let input = "url?a=1&amp;b=2&amp;c=3";
+        assert_eq!(decode_html_entities(input), "url?a=1&b=2&c=3");
+    }
+
+    #[test]
+    fn decode_html_entities_fastpath_no_ampersand() {
+        let s = "no entities here";
+        assert_eq!(decode_html_entities(s), s);
+    }
+
+    #[test]
+    fn extract_image_urls_absolute() {
+        let html = r#"<img src="https://cdn.example.com/photo.jpg" />"#;
+        let pairs = extract_image_urls(html, "https://example.com/article");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "https://cdn.example.com/photo.jpg");
+        assert_eq!(pairs[0].1, "https://cdn.example.com/photo.jpg");
+    }
+
+    #[test]
+    fn extract_image_urls_relative_resolved() {
+        let html = r#"<img src="../images/photo.jpg" />"#;
+        let pairs = extract_image_urls(html, "https://example.com/posts/article");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].1, "https://example.com/images/photo.jpg");
+    }
+
+    #[test]
+    fn extract_image_urls_entity_encoded_src_decoded() {
+        let html = r#"<img src="https://cdn.example.com/image?a=1&amp;b=2" />"#;
+        let pairs = extract_image_urls(html, "https://example.com/article");
+        assert_eq!(pairs.len(), 1);
+        // raw src preserved as-is, but abs URL has decoded ampersand
+        assert_eq!(pairs[0].0, "https://cdn.example.com/image?a=1&amp;b=2");
+        assert_eq!(pairs[0].1, "https://cdn.example.com/image?a=1&b=2");
+    }
+
+    #[test]
+    fn extract_image_urls_skips_data_uri() {
+        let html = r#"<img src="data:image/png;base64,abc" />"#;
+        let pairs = extract_image_urls(html, "https://example.com/article");
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn extract_image_urls_skips_non_http_scheme() {
+        let html = r#"<img src="ftp://example.com/img.jpg" />"#;
+        let pairs = extract_image_urls(html, "https://example.com/article");
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn extract_image_urls_invalid_article_url_returns_empty() {
+        let html = r#"<img src="photo.jpg" />"#;
+        let pairs = extract_image_urls(html, "not-a-url");
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn rewrite_img_srcs_replaces_matching_src() {
+        let html = r#"<img src="https://cdn.example.com/photo.jpg" />"#;
+        let mut map = HashMap::new();
+        map.insert("https://cdn.example.com/photo.jpg".to_string(), "images/abc123.jpeg".to_string());
+        let result = rewrite_img_srcs(html, &map);
+        assert!(result.contains(r#"src="images/abc123.jpeg""#));
+    }
+
+    #[test]
+    fn rewrite_img_srcs_no_match_unchanged() {
+        let html = r#"<img src="https://cdn.example.com/other.jpg" />"#;
+        let mut map = HashMap::new();
+        map.insert("https://cdn.example.com/photo.jpg".to_string(), "images/abc123.jpeg".to_string());
+        let result = rewrite_img_srcs(html, &map);
+        assert!(result.contains(r#"src="https://cdn.example.com/other.jpg""#));
+    }
+
+    #[test]
+    fn rewrite_img_srcs_empty_map_noop() {
+        let html = r#"<img src="https://cdn.example.com/photo.jpg" />"#;
+        let result = rewrite_img_srcs(html, &HashMap::new());
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn strip_external_imgs_removes_http_src() {
+        let html = r#"<p>text</p><img src="https://cdn.example.com/photo.jpg" />after"#;
+        let result = strip_external_imgs(html);
+        assert!(!result.contains("<img"));
+        assert!(result.contains("<p>text</p>"));
+    }
+
+    #[test]
+    fn strip_external_imgs_keeps_local_src() {
+        let html = r#"<img src="images/abc123.jpeg" />"#;
+        let result = strip_external_imgs(html);
+        assert!(result.contains("<img"));
+        assert!(result.contains("images/abc123.jpeg"));
+    }
+
+    #[test]
+    fn sanitize_data_attrs_blanks_json_value() {
+        let html = r#"<img data-attrs="{&quot;src&quot;:&quot;https://cdn.example.com/img.jpg&quot;}" src="photo.jpg" />"#;
+        let result = sanitize_data_attrs(html);
+        assert!(result.contains(r#"data-attrs="""#));
+        assert!(result.contains(r#"src="photo.jpg""#)); // src untouched
+    }
+
+    #[test]
+    fn sanitize_data_attrs_blanks_image_extension() {
+        let html = r#"<img data-src="https://example.com/photo.png" src="fallback.jpg" />"#;
+        let result = sanitize_data_attrs(html);
+        assert!(result.contains(r#"data-src="""#));
+    }
+
+    #[test]
+    fn sanitize_data_attrs_keeps_innocuous_value() {
+        let html = r#"<div data-id="12345" data-count="42">content</div>"#;
+        let result = sanitize_data_attrs(html);
+        assert!(result.contains(r#"data-id="12345""#));
+        assert!(result.contains(r#"data-count="42""#));
+    }
+}
+
 fn process_image_bytes(
     bytes: Vec<u8>,
     abs_url: &str,
