@@ -26,6 +26,7 @@ feedbook [--url <feed-url>] [--config <path>] [options]
 | `--content-selectors`  | *(Readability)*          | One or more CSS selectors whose matched elements form the article body   |
 | `--remove-selectors`   | *(none)*                 | One or more CSS selectors whose matched elements are stripped first       |
 | `--report-times`       | off                      | Print `[TIMING]` lines to stderr for each pipeline stage                 |
+| `--log`                | off                      | Write a timestamped `feedbook.log` next to the binary for the entire run |
 
 ### Examples
 
@@ -86,6 +87,26 @@ Generating cover...
 Cover ready
 Building EPUB (2 articles)...
 Written: hacker-news.epub
+```
+
+### Log file
+
+`--log` writes a timestamped record of every run to `feedbook.log` in the same directory as the feedbook binary, creating or truncating the file on each run. The log captures feed title, article titles, cover status, EPUB output path, timing lines (if `--report-times` is set), and any errors — regardless of whether `--stdout` mode is active.
+
+```
+[2026-04-21 14:32:01] Feed: Hacker News
+[2026-04-21 14:32:01] Article: Show HN: My project
+[2026-04-21 14:32:02] Article: Ask HN: Something interesting
+[2026-04-21 14:32:03] Cover ready
+[2026-04-21 14:32:03] Building EPUB (2 articles)...
+[2026-04-21 14:32:03] Written: hacker-news.epub
+```
+
+Enable it in `[defaults]` to log every run automatically:
+
+```toml
+[defaults]
+log = true
 ```
 
 ### Custom content selectors
@@ -174,7 +195,7 @@ When `--url` is given alongside a config file, only that feed is processed. If t
 | `remove_selectors`  | array of strings | CSS selectors for elements to strip before extraction             |
 | `report_times`      | bool             | Print `[TIMING]` lines to stderr for each pipeline stage          |
 
-`dbpath` is only valid in `[defaults]`, not per feed.
+`dbpath` and `log` are only valid in `[defaults]`, not per feed.
 
 A copy of `feedbook.example.toml` with all options annotated is included in the repository.
 

@@ -24,6 +24,7 @@ max_image_width = 460                 # resize wider images to this
 force           = false               # re-fetch even cached articles?
 stdout          = false               # plain log output instead of progress bars?
 report_times    = false               # print [TIMING] lines for each pipeline stage?
+log             = false               # write feedbook.log (next to binary) for every run?
 
 # ============================================================
 # [[feeds]] — one entry per feed, processed in order.

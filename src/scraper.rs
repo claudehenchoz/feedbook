@@ -78,7 +78,7 @@ mod tests {
         };
         let result = scrape_article(
             &client, item, sanitizer, &times,
-            LogSink::Stderr, None, None,
+            LogSink::stderr(), None, None,
         ).await;
         assert!(result.is_some(), "URL should be cached even on HTTP error status");
         assert!(result.unwrap().html.is_none(), "html should be empty on failed extraction");
@@ -114,7 +114,7 @@ mod tests {
         };
         let result = scrape_article(
             &client, item, sanitizer, &times,
-            LogSink::Stderr, None, None,
+            LogSink::stderr(), None, None,
         ).await;
         // Should return Some regardless of whether readability extraction succeeded —
         // the URL is always cached even on readability failure.

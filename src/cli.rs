@@ -54,4 +54,8 @@ pub struct Args {
     /// Print timing information for each pipeline stage
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub report_times: Option<bool>,
+
+    /// Write a timestamped log of the entire run to feedbook.log next to the binary
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub log: Option<bool>,
 }

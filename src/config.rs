@@ -17,6 +17,7 @@ pub struct RawDefaults {
     pub content_selectors: Option<Vec<String>>,
     pub remove_selectors:  Option<Vec<String>>,
     pub report_times:      Option<bool>,
+    pub log:               Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -166,6 +167,7 @@ mod tests {
             content_selectors: None,
             remove_selectors: None,
             report_times: None,
+            log: None,
         }
     }
 
