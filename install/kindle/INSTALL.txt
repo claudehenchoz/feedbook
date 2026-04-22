@@ -1,4 +1,4 @@
-1. Jailbreak your Kindle and install KUAL and KOReader first (KOReader required for epub reading): https://pgaskin.net/NickelMenu/#install
+1. Jailbreak your Kindle and install KUAL and KOReader first (KOReader required for epub reading): https://kindlemodding.org/jailbreaking/
 2. Connect your Kindle via USB.
 3. Drag the extensions folder from this zip onto your Kindle.
 4. Eject, connect to wifi, tap KUAL → Feedbook.
