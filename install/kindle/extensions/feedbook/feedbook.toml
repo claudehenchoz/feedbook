@@ -1,0 +1,11 @@
+[defaults]
+outfolder       = "/mnt/us/documents/_feedbook"      # where EPUBs are written
+limit           = 20                                # max articles per feed
+kobo            = false                             # produce KEPUB by default
+max_image_width = 460                               # resize wider images to this
+stdout          = true                              # plain log output instead of progress bars?
+dbpath		    = "/mnt/us/extensions/feedbook"     # on sdcard
+log             = false
+
+[[feeds]]
+url   = "https://hnrss.org/newest?points=100"

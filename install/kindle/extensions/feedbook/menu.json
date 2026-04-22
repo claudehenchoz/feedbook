@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "name": "Feedbook",
+      "priority": 1,
+      "items": [
+        {
+          "name": "Run Feedbook",
+          "priority": 1,
+          "action": "bin/feedbook.sh",
+          "params": "run",
+          "refresh": true,
+          "status": false
+        },
+        {
+          "name": "Force refresh",
+          "priority": 2,
+          "action": "bin/feedbook.sh",
+          "params": "force",
+          "status": false
+        }
+      ]
+    }
+  ]
+}
