@@ -2,8 +2,10 @@
 
 Convert any RSS or Atom feed into a clean, readable EPUB file. Point it at a feed URL and get a properly formatted e-book with full article content, images included, ready for your e-reader.
 
-Runs natively on Kobo e-readers for on-device feed-updates: [Running Feedbook on Kobo
-](README.kobo.md)
+Runs natively on Kobo and Kindle e-readers for on-device feed-updates:
+
+* [Running Feedbook on Kobo](README.kobo.md)
+* [Running Feedbook on Kindle](README.kindle.md)
 
 ## Usage
 
