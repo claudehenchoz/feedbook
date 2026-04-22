@@ -63,6 +63,72 @@ jobs:
           name: ${{ env.STAGE }}
           path: ${{ env.STAGE }}.zip
 
+  build-kindle-armv7:
+    needs: test
+    name: Build Kindle install kit (armv7 glibc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build feedbook for Kindle (armv7 gnueabihf)
+        run: cross build --release --target armv7-unknown-linux-musleabihf
+      - name: Assemble install kit
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="feedbook-kindle-paperwhite3-and-older-${VERSION}.zip"
+          cp -r install/kindle "${STAGE}"
+          cp target/armv7-unknown-linux-musleabihf/release/feedbook \
+              "${STAGE}/extensions/feedbook/feedbook"
+          chmod +x "${STAGE}/extensions/feedbook/feedbook"
+          chmod +x "${STAGE}/extensions/feedbook/bin/feedbook.sh"
+          file "${STAGE}/extensions/feedbook/feedbook"
+          zip -r "${STAGE}.zip" "${STAGE}"
+          echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.STAGE }}.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  build-kindle-aarch64:
+    needs: test
+    name: Build Kindle install kit (aarch64 musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build feedbook for Kindle (aarch64 musl)
+        run: cross build --release --target aarch64-unknown-linux-musl
+      - name: Assemble install kit
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="feedbook-kindle-paperwhite4-and-newer-${VERSION}.zip"
+          cp -r install/kindle "${STAGE}"
+          cp target/aarch64-unknown-linux-musl/release/feedbook \
+            "${STAGE}/extensions/feedbook/feedbook"
+          chmod +x "${STAGE}/extensions/feedbook/feedbook"
+          chmod +x "${STAGE}/extensions/feedbook/bin/feedbook.sh"
+          file "${STAGE}/extensions/feedbook/feedbook"
+          zip -r "${STAGE}.zip" "${STAGE}"
+          echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE }}
+          path: ${{ env.STAGE }}.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.STAGE }}.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
   build-windows:
     needs: test
     name: Build Windows x86_64
