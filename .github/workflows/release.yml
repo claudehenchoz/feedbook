@@ -65,7 +65,7 @@ jobs:
 
   build-kindle-armv7:
     needs: test
-    name: Build Kindle install kit (armv7 glibc)
+    name: Build Kindle install kit (armv7 musl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -268,7 +268,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build-kobo, build-windows, build-macos, build-linux]
+    needs: [build-kobo, build-windows, build-macos, build-linux, build-kindle-armv7, build-kindle-aarch64]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
