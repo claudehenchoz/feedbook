@@ -1,6 +1,23 @@
-1. Jailbreak your Kindle and install KUAL and KOReader first (KOReader required for epub reading): https://kindlemodding.org/jailbreaking/
-2. Connect your Kindle via USB.
-3. Drag the extensions folder from this zip onto your Kindle.
-4. Eject, connect to wifi, tap KUAL → Feedbook.
+Feedbook for Kindle — quick install
+====================================
 
-Edit extensions/feedbook/feedbook.toml to add more feeds.
+Prerequisites:
+  - Jailbroken Kindle + KUAL installed
+    https://wiki.mobileread.com/wiki/Kindle_Hacks_Information
+  - KOReader strongly recommended (stock firmware has no EPUB
+    support): https://github.com/koreader/koreader/wiki/Installation-on-Kindle-devices
+
+1. Connect your Kindle via USB.
+
+2. Drag the extensions folder from this zip onto the Kindle,
+   merging with the existing extensions folder.
+
+3. (Optional) Edit extensions/feedbook/feedbook.toml to add your
+   feeds.
+
+4. Eject. Connect the Kindle to Wi-Fi. Open KUAL, tap Feedbook,
+   then Run Feedbook. New EPUBs appear in the feedbook folder —
+   open them with KOReader.
+
+Full guide (config keys, troubleshooting, custom selectors):
+  https://github.com/claudehenchoz/feedbook/blob/master/README.kindle.md

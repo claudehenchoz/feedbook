@@ -1,6 +1,22 @@
-1. Install NickelMenu first: https://pgaskin.net/NickelMenu/#install
-2. Connect your Kobo via USB.
-3. Drag the .adds folder from this zip onto your Kobo.
-4. Eject, connect to wifi, tap NickelMenu → Feedbook.
+Feedbook for Kobo — quick install
+==================================
 
-Edit .adds/feedbook/feedbook.toml to add more feeds.
+Prerequisite: NickelMenu must already be installed.
+  https://pgaskin.net/NickelMenu/#install
+
+1. Connect your Kobo via USB.
+
+2. Drag the .adds folder from this zip onto the root of the Kobo,
+   merging with the existing .adds folder if NickelMenu created one.
+
+3. (Optional) Edit .adds/feedbook/feedbook.toml on the Kobo to add
+   the feeds you want.
+
+4. Safely eject. Connect the Kobo to Wi-Fi.
+
+5. Tap the NickelMenu icon (bottom-right of the home screen), then
+   tap Feedbook. A toast confirms it started; another confirms when
+   it's done. New KEPUBs appear in the _feedbook collection.
+
+Full guide (config keys, troubleshooting, custom selectors):
+  https://github.com/claudehenchoz/feedbook/blob/master/README.kobo.md
