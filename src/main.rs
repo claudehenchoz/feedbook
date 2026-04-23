@@ -521,6 +521,8 @@ async fn run_feed(
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
+    println!("Feedbook - v{}", env!("CARGO_PKG_VERSION"));
+
     let args = Args::parse();
 
     let config_result = config::load_config(args.config.as_deref())?;
