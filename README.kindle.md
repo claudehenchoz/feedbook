@@ -67,7 +67,6 @@ Open `extensions/feedbook/feedbook.toml` on the Kindle in a text editor and add 
 outfolder       = "/mnt/us/documents/feedbook"
 limit           = 20
 max_image_width = 460
-stdout          = true
 dbpath          = "/mnt/us/extensions/feedbook"
 
 [[feeds]]
@@ -78,7 +77,6 @@ A few device-specific notes on these defaults:
 
 - `outfolder = "/mnt/us/documents/feedbook"` puts generated files in a `feedbook` subfolder of the Kindle library.
 - No `kobo = true` — that flag produces Kobo-specific `.kepub.epub` files that Kindle readers don't benefit from. Feedbook produces standard EPUB on Kindle.
-- `stdout = true` swaps progress bars for plain log lines — there's no interactive terminal on-device.
 - `dbpath` points at the same folder as the binary so re-runs only fetch new articles.
 
 For the full list of config keys and what they do, see the [main README](README.md#config-keys).

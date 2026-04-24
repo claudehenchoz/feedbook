@@ -31,10 +31,6 @@ pub struct Args {
     #[arg(long)]
     pub dbpath: Option<String>,
 
-    /// Print plain log lines instead of progress bars (for CI/CD)
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    pub stdout: Option<bool>,
-
     /// Produce Kobo KEPUB (.kepub.epub) instead of standard EPUB
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub kobo: Option<bool>,

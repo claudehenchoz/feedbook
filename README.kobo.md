@@ -40,7 +40,6 @@ outfolder       = "/mnt/onboard/_feedbook"
 limit           = 20
 kobo            = true
 max_image_width = 460
-stdout          = true
 dbpath          = "/mnt/onboard/.adds/feedbook"
 
 [[feeds]]
@@ -51,7 +50,6 @@ A few device-specific notes on these defaults:
 
 - `outfolder = "/mnt/onboard/_feedbook"` puts generated files in a collection at the root of the Kobo library.
 - `kobo = true` produces `.kepub.epub` so Kobo's enhanced reading features work (stats, precise bookmarks, highlights).
-- `stdout = true` swaps progress bars for plain log lines — there's no interactive terminal on-device.
 - `dbpath` points at the same folder as the binary so re-runs only fetch new articles.
 
 For the full list of config keys and what they do, see the [main README](README.md#config-keys).

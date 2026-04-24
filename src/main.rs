@@ -14,17 +14,22 @@ mod throttle;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use clap::Parser;
 use cli::Args;
 use config::{RawDefaults, RawFeed, ResolvedFeedConfig};
-use console::style;
 use error::AppError;
 use futures::StreamExt;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::LogSink;
 use tokio::sync::{Mutex, Semaphore};
+
+/// Returns the hostname of `url` (e.g. `hnrss.org`) for use as a log line prefix.
+fn feed_log_prefix(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_else(|| url.to_owned())
+}
 
 fn resolve_db_path(cfg: &ResolvedFeedConfig) -> Result<PathBuf, AppError> {
     match &cfg.dbpath {
@@ -43,13 +48,12 @@ async fn run_feed(
     log_file: Option<log::LogFile>,
 ) -> Result<(), AppError> {
     let t_start = std::time::Instant::now();
-    let run_log = LogSink::stderr().with_file_opt(log_file.clone());
+    let run_log = LogSink::new(feed_log_prefix(&cfg.url)).with_file_opt(log_file.clone());
 
     // Per-feed prune (TTL + per-feed cap)
     cache::prune(conn, &cfg.url)?;
     let cached_urls: HashSet<String> = cache::get_cached_urls(conn, &cfg.url)?;
 
-    // Fetch and parse feed
     let report_times = cfg.report_times;
 
     let t = std::time::Instant::now();
@@ -58,23 +62,17 @@ async fn run_feed(
     // Apply name override: cfg.name replaces feed's self-reported title
     let feed_title = cfg.name.clone().unwrap_or(feed_data.title);
     let feed_date  = feed_data.date;
-    if cfg.stdout {
-        run_log.println(&format!("Feed: {}", feed_title));
-    } else {
-        run_log.write_file(&format!("Feed: {}", feed_title));
-    }
+    run_log.println(&format!("Feed: {}", feed_title));
+
     let mut feed_items = feed_data.items;
     if let Some(n) = cfg.limit {
         feed_items.truncate(n);
     }
 
-    // Partition into items that need fetching vs those already in cache
-    let feed_item_count = feed_items.len();
     let to_fetch: Vec<_> = feed_items
         .into_iter()
         .filter(|item| cfg.force || !cached_urls.contains(&item.url))
         .collect();
-    let cached_count = feed_item_count - to_fetch.len();
 
     // ── Shared pipeline state ─────────────────────────────────────────────────
 
@@ -89,53 +87,6 @@ async fn run_feed(
     };
     let seen_sha1s = Arc::new(Mutex::new(cached_sha1s));
 
-    let article_fetched = Arc::new(AtomicU64::new(0));
-    let img_fetched     = Arc::new(AtomicU64::new(0));
-    let img_hits        = Arc::new(AtomicU64::new(0));
-
-    // ── MultiProgress bars (skipped in --stdout mode) ─────────────────────────
-    let mp: Option<MultiProgress>;
-    let article_pb: Option<ProgressBar>;
-    let image_pb: Option<ProgressBar>;
-
-    if cfg.stdout {
-        mp         = None;
-        article_pb = None;
-        image_pb   = None;
-    } else {
-        let m = MultiProgress::with_draw_target(
-            indicatif::ProgressDrawTarget::stderr_with_hz(8),
-        );
-        let apb = m.add(ProgressBar::new(feed_item_count as u64));
-        apb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} articles  {msg}"
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-        if cached_count > 0 {
-            apb.inc(cached_count as u64);
-            apb.set_message(style(format!("{} cached", cached_count)).dim().to_string());
-        }
-        let ipb: Option<ProgressBar> = if cfg.no_images || to_fetch.is_empty() {
-            None
-        } else {
-            let pb = m.add(ProgressBar::new(0));
-            pb.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.cyan} [{bar:40.magenta/blue}] {pos}/{len} images  {msg}"
-                )
-                .unwrap()
-                .progress_chars("#>-"),
-            );
-            Some(pb)
-        };
-        mp         = Some(m);
-        article_pb = Some(apb);
-        image_pb   = ipb;
-    };
-
     // ── Cover template cache check + conditional favicon spawn ───────────────
 
     // Use cfg.name as the cover title if provided, otherwise derive from URL
@@ -147,7 +98,7 @@ async fn run_feed(
     let cover_template_cache = cache::get_cached_cover(conn, &template_key)?;
     let had_cached_template  = cover_template_cache.is_some();
 
-    // Only fetch the favicon when we actually need to rebuild the template.
+    // Only fetch the favicon when we actually need to (re)build the template.
     let favicon_handle: Option<tokio::task::JoinHandle<Option<Vec<u8>>>> =
         if !had_cached_template {
             let client_favicon  = client.clone();
@@ -166,7 +117,6 @@ async fn run_feed(
 
     let no_images = cfg.no_images;
     let max_w     = cfg.max_image_width;
-    let stdout    = cfg.stdout;
     let content_selectors: Option<Arc<Vec<String>>> =
         cfg.content_selectors.as_ref().map(|v| Arc::new(v.clone()));
     let remove_selectors: Option<Arc<Vec<String>>> =
@@ -177,81 +127,46 @@ async fn run_feed(
 
         // ── Arm A: per-article scrape → per-article image download ────────────
         {
-            let client              = client.clone();
-            let host_times          = host_times.clone();
-            let image_sem           = image_sem.clone();
-            let seen_sha1s          = seen_sha1s.clone();
-            let sanitizer           = sanitizer.clone();
-            let article_pb          = article_pb.clone();
-            let image_pb            = image_pb.clone();
-            let article_fetched     = article_fetched.clone();
-            let img_fetched         = img_fetched.clone();
-            let img_hits            = img_hits.clone();
-            let content_selectors   = content_selectors.clone();
-            let remove_selectors    = remove_selectors.clone();
-            let log_file            = log_file.clone();
+            let run_log           = run_log.clone();
+            let client            = client.clone();
+            let host_times        = host_times.clone();
+            let image_sem         = image_sem.clone();
+            let seen_sha1s        = seen_sha1s.clone();
+            let sanitizer         = sanitizer.clone();
+            let content_selectors = content_selectors.clone();
+            let remove_selectors  = remove_selectors.clone();
             async move {
                 let results: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> =
                     futures::stream::iter(to_fetch)
                         .map({
-                            let client              = client.clone();
-                            let host_times          = host_times.clone();
-                            let image_sem           = image_sem.clone();
-                            let seen_sha1s          = seen_sha1s.clone();
-                            let sanitizer           = sanitizer.clone();
-                            let article_pb          = article_pb.clone();
-                            let image_pb            = image_pb.clone();
-                            let article_fetched     = article_fetched.clone();
-                            let img_fetched         = img_fetched.clone();
-                            let img_hits            = img_hits.clone();
-                            let content_selectors   = content_selectors.clone();
-                            let remove_selectors    = remove_selectors.clone();
-                            let log_file            = log_file.clone();
+                            let run_log           = run_log.clone();
+                            let client            = client.clone();
+                            let host_times        = host_times.clone();
+                            let image_sem         = image_sem.clone();
+                            let seen_sha1s        = seen_sha1s.clone();
+                            let sanitizer         = sanitizer.clone();
+                            let content_selectors = content_selectors.clone();
+                            let remove_selectors  = remove_selectors.clone();
                             move |item| {
-                                let client              = client.clone();
-                                let host_times          = host_times.clone();
-                                let image_sem           = image_sem.clone();
-                                let seen_sha1s          = seen_sha1s.clone();
-                                let sanitizer           = sanitizer.clone();
-                                let article_pb          = article_pb.clone();
-                                let image_pb            = image_pb.clone();
-                                let article_fetched     = article_fetched.clone();
-                                let img_fetched         = img_fetched.clone();
-                                let img_hits            = img_hits.clone();
-                                let content_selectors   = content_selectors.clone();
-                                let remove_selectors    = remove_selectors.clone();
-                                let log_file            = log_file.clone();
+                                let run_log           = run_log.clone();
+                                let client            = client.clone();
+                                let host_times        = host_times.clone();
+                                let image_sem         = image_sem.clone();
+                                let seen_sha1s        = seen_sha1s.clone();
+                                let sanitizer         = sanitizer.clone();
+                                let content_selectors = content_selectors.clone();
+                                let remove_selectors  = remove_selectors.clone();
                                 async move {
-                                    let log = match article_pb.as_ref() {
-                                        Some(pb) => LogSink::bar(pb.clone()),
-                                        None     => LogSink::stderr(),
-                                    }.with_file_opt(log_file.clone());
-
                                     let item_url = item.url.clone();
                                     let maybe_article = scraper::scrape_article(
-                                        &client, item, sanitizer, &host_times, log.clone(),
+                                        &client, item, sanitizer, &host_times, run_log.clone(),
                                         content_selectors, remove_selectors,
                                     ).await;
 
-                                    {
-                                        let label = maybe_article.as_ref()
-                                            .and_then(|a| a.title.as_deref())
-                                            .unwrap_or(&item_url);
-                                        if stdout {
-                                            log.println(&format!("Article: {}", label));
-                                        } else {
-                                            log.write_file(&format!("Article: {}", label));
-                                            if let Some(ref pb) = article_pb {
-                                                pb.inc(1);
-                                                let fetched = article_fetched.fetch_add(1, Ordering::Relaxed) + 1;
-                                                pb.set_message(format!(
-                                                    "{}  {}",
-                                                    style(format!("{} cached", cached_count)).dim(),
-                                                    style(format!("{} fetched", fetched)).cyan(),
-                                                ));
-                                            }
-                                        }
-                                    }
+                                    let label = maybe_article.as_ref()
+                                        .and_then(|a| a.title.as_deref())
+                                        .unwrap_or(&item_url);
+                                    run_log.println(&format!("Article: {}", label));
 
                                     let article = maybe_article?;
 
@@ -264,72 +179,31 @@ async fn run_feed(
                                             &article.url,
                                         );
 
-                                        let (hit_count, to_download) = {
+                                        let to_download = {
                                             let mut seen = seen_sha1s.lock().await;
-                                            let mut hits = 0u64;
-                                            let mut new_urls = Vec::new();
-                                            for pair in img_urls {
-                                                if seen.insert(images::url_sha1(&pair.1)) {
-                                                    new_urls.push(pair);
-                                                } else {
-                                                    hits += 1;
-                                                }
-                                            }
-                                            (hits, new_urls)
+                                            img_urls
+                                                .into_iter()
+                                                .filter(|(_, u)| seen.insert(images::url_sha1(u)))
+                                                .collect::<Vec<_>>()
                                         };
-
-                                        if hit_count > 0 {
-                                            let prev = img_hits.fetch_add(hit_count, Ordering::Relaxed);
-                                            if let Some(ref pb) = image_pb {
-                                                let total_hits    = prev + hit_count;
-                                                let total_fetched = img_fetched.load(Ordering::Relaxed);
-                                                pb.set_message(format!(
-                                                    "{}  {}",
-                                                    style(format!("{} cached", total_hits)).dim(),
-                                                    style(format!("{} fetched", total_fetched)).cyan(),
-                                                ));
-                                            }
-                                        }
-                                        if !to_download.is_empty() {
-                                            if let Some(ref pb) = image_pb {
-                                                pb.inc_length(to_download.len() as u64);
-                                            }
-                                        }
 
                                         futures::stream::iter(to_download)
                                             .map({
-                                                let client      = client.clone();
-                                                let host_times  = host_times.clone();
-                                                let image_sem   = image_sem.clone();
-                                                let image_pb    = image_pb.clone();
-                                                let img_fetched = img_fetched.clone();
-                                                let img_hits    = img_hits.clone();
-                                                let log         = log.clone();
+                                                let client     = client.clone();
+                                                let host_times = host_times.clone();
+                                                let image_sem  = image_sem.clone();
+                                                let run_log    = run_log.clone();
                                                 move |(raw_src, abs_url)| {
-                                                    let client      = client.clone();
-                                                    let host_times  = host_times.clone();
-                                                    let image_sem   = image_sem.clone();
-                                                    let image_pb    = image_pb.clone();
-                                                    let img_fetched = img_fetched.clone();
-                                                    let img_hits    = img_hits.clone();
-                                                    let log         = log.clone();
+                                                    let client     = client.clone();
+                                                    let host_times = host_times.clone();
+                                                    let image_sem  = image_sem.clone();
+                                                    let run_log    = run_log.clone();
                                                     async move {
-                                                        let result = images::download_image(
+                                                        images::download_image(
                                                             &client, raw_src, abs_url,
                                                             max_w, &host_times, &image_sem,
-                                                            log,
-                                                        ).await;
-                                                        if let Some(ref pb) = image_pb {
-                                                            pb.inc(1);
-                                                            let total_fetched = img_fetched.fetch_add(1, Ordering::Relaxed) + 1;
-                                                            let total_hits    = img_hits.load(Ordering::Relaxed);
-                                                            pb.set_message(format!(
-                                                                "{}  {}",
-                                                                style(format!("{} cached", total_hits)).dim(),
-                                                                style(format!("{} fetched", total_fetched)).cyan(),
-                                                            ));
-                                                        }
-                                                        result
+                                                            run_log,
+                                                        ).await
                                                     }
                                                 }
                                             })
@@ -347,43 +221,18 @@ async fn run_feed(
                         .filter_map(|r| async move { r })
                         .collect::<Vec<_>>()
                         .await;
-
-                if let Some(ref pb) = article_pb {
-                    pb.finish();
-                }
-                if let Some(ref pb) = image_pb {
-                    pb.finish();
-                }
                 results
             }
         },
 
         // ── Arm B: cover template (cached or generated) + date overlay ───────
         {
-            let mp_cover     = mp.clone();
-            let domain_title = domain_title.clone();
-            let run_log      = run_log.clone();
+            let run_log = run_log.clone();
             async move {
-                let cover_sp = mp_cover.as_ref().map(|m| {
-                    let sp = m.add(ProgressBar::new_spinner());
-                    sp.set_style(
-                        ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap()
-                    );
-                    sp.set_message(if had_cached_template { "Applying date to cover..." } else { "Fetching favicon..." });
-                    sp
-                });
-
                 // ── 1. Get or build the static template ──────────────────────
                 let (template, new_template): (Vec<u8>, Option<Vec<u8>>) =
                     if let Some(cached) = cover_template_cache {
-                        if let Some(ref sp) = cover_sp {
-                            sp.set_message("Cover template cached");
-                            run_log.write_file("Cover template cached");
-                        } else if stdout {
-                            run_log.println("Cover template cached");
-                        } else {
-                            run_log.write_file("Cover template cached");
-                        }
+                        run_log.println("Cover template cached");
                         if report_times { run_log.println("[TIMING] cover template: cached (skipped generation)"); }
                         (cached, None)
                     } else {
@@ -391,14 +240,7 @@ async fn run_feed(
                         let favicon = if let Some(h) = favicon_handle { h.await.ok().flatten() } else { None };
                         if report_times { run_log.println(&format!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed())); }
 
-                        if let Some(ref sp) = cover_sp {
-                            sp.set_message("Generating cover template...");
-                            run_log.write_file("Generating cover template...");
-                        } else if stdout {
-                            run_log.println("Generating cover template...");
-                        } else {
-                            run_log.write_file("Generating cover template...");
-                        }
+                        run_log.println("Generating cover template...");
 
                         let title_owned = domain_title;
                         let t_cover = std::time::Instant::now();
@@ -426,14 +268,7 @@ async fn run_feed(
                 .and_then(|r| r.ok())?;
                 if report_times { run_log.println(&format!("[TIMING] cover date apply: {:?}", t_apply.elapsed())); }
 
-                if let Some(sp) = cover_sp {
-                    sp.finish_with_message("Cover ready");
-                    run_log.write_file("Cover ready");
-                } else if stdout {
-                    run_log.println("Cover ready");
-                } else {
-                    run_log.write_file("Cover ready");
-                }
+                run_log.println("Cover ready");
 
                 Some((cover, new_template))
             }
@@ -499,20 +334,8 @@ async fn run_feed(
 
     // ── Build EPUB / KEPUB ────────────────────────────────────────────────────
 
-    let epub_sp = mp.as_ref().map(|m| {
-        let sp = m.add(ProgressBar::new_spinner());
-        sp.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
-        sp.set_message(format!("Building {} ({} articles)...",
-            if cfg.kobo { "KEPUB" } else { "EPUB" }, all_articles.len()));
-        sp
-    });
-    if epub_sp.is_none() && cfg.stdout {
-        run_log.println(&format!("Building {} ({} articles)...",
-            if cfg.kobo { "KEPUB" } else { "EPUB" }, all_articles.len()));
-    } else {
-        run_log.write_file(&format!("Building {} ({} articles)...",
-            if cfg.kobo { "KEPUB" } else { "EPUB" }, all_articles.len()));
-    }
+    run_log.println(&format!("Building {} ({} articles)...",
+        if cfg.kobo { "KEPUB" } else { "EPUB" }, all_articles.len()));
 
     let output_path = epub::derive_output_path(&feed_title, cfg.kobo);
     let output_path = if let Some(ref folder) = cfg.outfolder {
@@ -538,12 +361,7 @@ async fn run_feed(
         run_log.println(&format!("[TIMING] total: {:?}", t_start.elapsed()));
     }
 
-    if let Some(sp) = epub_sp {
-        sp.finish_with_message(format!("Written: {}", output_display));
-        run_log.write_file(&format!("Written: {}", output_display));
-    } else {
-        run_log.println(&format!("Written: {}", output_display));
-    }
+    run_log.println(&format!("Written: {}", output_display));
 
     Ok(())
 }
@@ -602,8 +420,7 @@ async fn main() -> Result<(), AppError> {
             };
 
             if feeds.is_empty() {
-                let sink = LogSink::stderr().with_file_opt(log_file.clone());
-                sink.println("No feeds to process.");
+                println!("No feeds to process.");
                 return Ok(());
             }
 
@@ -623,8 +440,7 @@ async fn main() -> Result<(), AppError> {
 
     for cfg in &feeds_to_run {
         if let Err(e) = run_feed(cfg, &client, &mut conn, log_file.clone()).await {
-            let sink = LogSink::stderr().with_file_opt(log_file.clone());
-            sink.println(&format!("Error processing {}: {e}", cfg.url));
+            eprintln!("{}: Error: {e}", feed_log_prefix(&cfg.url));
         }
     }
 

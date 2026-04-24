@@ -195,7 +195,7 @@ pub fn sanitize_data_attrs(html: &str) -> String {
 /// Uses `throttled_get` to respect per-host rate limits.
 ///
 /// `log_pb` must be a `ProgressBar` belonging to the active `MultiProgress`.
-/// Errors are routed through `log_pb.println()` so they appear above the bars
+/// Errors are routed through `log.println()`.
 /// without corrupting the cursor-tracking used for in-place updates.
 pub async fn download_image(
     client:    &reqwest::Client,
@@ -233,7 +233,6 @@ pub async fn download_image(
     tokio::task::spawn_blocking(move || {
         process_image_bytes(bytes.to_vec(), &abs_url_clone, &sha1, max_width, &log)
     })
-    // spawn_blocking requires Send; LogSink::Bar(ProgressBar) is Send
     .await
     .ok()
     .and_then(|r| r)

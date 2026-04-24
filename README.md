@@ -38,7 +38,18 @@ From the folder where you unpacked the zip:
 
 (On Windows: `feedbook.exe --url ... --limit 10`.)
 
-You'll see progress bars as Feedbook fetches the feed, scrapes article pages, downloads images, and builds the EPUB. When it finishes, `hacker-news.epub` is in the current directory. Copy it to your e-reader and open it.
+Feedbook prints a line per event as it fetches the feed, scrapes article pages, downloads images, and builds the EPUB — each line is prefixed with the feed's domain:
+
+```
+news.ycombinator.com: Feed: Hacker News
+news.ycombinator.com: Article: Show HN: My project
+news.ycombinator.com: Article: Ask HN: Something interesting
+news.ycombinator.com: Cover ready
+news.ycombinator.com: Building EPUB (2 articles)...
+news.ycombinator.com: Written: hacker-news.epub
+```
+
+When it finishes, `hacker-news.epub` is in the current directory. Copy it to your e-reader and open it.
 
 That's it. Everything below is optional.
 
@@ -99,10 +110,9 @@ All keys are optional except `url` on each feed.
 | `no_images`         | bool             | `false`          | Strip images entirely                                               |
 | `max_image_width`   | integer          | `460`            | Resize wider images to this pixel width                             |
 | `force`             | bool             | `false`          | Re-fetch articles already in the cache                              |
-| `stdout`            | bool             | `false`          | Plain log lines instead of progress bars                            |
 | `content_selectors` | array of strings | —                | CSS selectors for the article body; bypasses Readability when set   |
 | `remove_selectors`  | array of strings | —                | CSS selectors for elements to strip before extraction               |
-| `report_times`      | bool             | `false`          | Print `[TIMING]` lines to stderr for each pipeline stage            |
+| `report_times`      | bool             | `false`          | Print `[TIMING]` lines for each pipeline stage                      |
 | `log`               | bool             | `false`          | Write a timestamped `feedbook.log` next to the binary every run     |
 
 ## Command-line flags
@@ -120,7 +130,6 @@ Every config key has a matching flag. CLI flags override everything.
 | `--no-images`         | Strip images                                                             |
 | `--max-image-width`   | Max image width in pixels                                                |
 | `--force`             | Re-fetch cached articles                                                 |
-| `--stdout`            | Plain log output                                                         |
 | `--content-selectors` | Space-separated list of selectors                                        |
 | `--remove-selectors`  | Space-separated list of selectors                                        |
 | `--report-times`      | Print timing info per stage                                              |
@@ -138,8 +147,8 @@ feedbook --url https://example.com/feed.rss --limit 10 --outfolder ~/ebooks
 # Kobo KEPUB
 feedbook --url https://news.ycombinator.com/rss --kobo
 
-# CI/CD: flat log, pinned DB location
-feedbook --url https://example.com/feed.rss --stdout --dbpath /data --outfolder /output
+# CI/CD: pinned DB location and output folder
+feedbook --url https://example.com/feed.rss --dbpath /data --outfolder /output
 
 # Force re-fetch, skip images
 feedbook --url https://example.com/feed.rss --force --no-images
@@ -163,18 +172,18 @@ feedbook
 
 **Custom content selectors.** By default Feedbook uses the [Readability](https://github.com/mozilla/readability) algorithm to extract article bodies. For sites where it produces poor results, `content_selectors` takes over: every matching element becomes part of the article body, and Readability is bypassed. `remove_selectors` strips noise (nav, banners, comments) *before* extraction — it only applies when `content_selectors` is also set. If the content selectors match nothing on a given page, Feedbook falls back to Readability automatically. Because the custom path produces no metadata, title, author, and date come from the feed.
 
-**Stdout mode** (`--stdout`) suppresses progress bars and emits plain log lines to stderr:
+**Output.** Feedbook always emits one log line per event to stdout, prefixed with the feed's hostname so lines stay readable when processing multiple feeds:
 
 ```
-Feed: Hacker News
-Article: Show HN: My project
-Article: Ask HN: Something interesting
-Cover ready
-Building EPUB (2 articles)...
-Written: hacker-news.epub
+hnrss.org: Feed: Hacker News: Newest
+hnrss.org: Cover template cached
+hnrss.org: Cover ready
+hnrss.org: Article: How LLMs Work — A Visual Deep Dive
+hnrss.org: Building EPUB (10 articles)...
+hnrss.org: Written: hacker-news-newest.epub
 ```
 
-**Log file** (`--log`, or `log = true` in `[defaults]`) mirrors the same events to `feedbook.log` next to the binary, with timestamps, regardless of `--stdout` state. The file is truncated on each run.
+**Log file** (`--log`, or `log = true` in `[defaults]`) mirrors the same events to `feedbook.log` next to the binary, with timestamps. The file is truncated on each run.
 
 ## Building from source
 

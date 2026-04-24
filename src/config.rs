@@ -13,7 +13,6 @@ pub struct RawDefaults {
     pub no_images:       Option<bool>,
     pub max_image_width: Option<u32>,
     pub force:             Option<bool>,
-    pub stdout:            Option<bool>,
     pub content_selectors: Option<Vec<String>>,
     pub remove_selectors:  Option<Vec<String>>,
     pub report_times:      Option<bool>,
@@ -31,7 +30,6 @@ pub struct RawFeed {
     pub no_images:       Option<bool>,
     pub max_image_width: Option<u32>,
     pub force:             Option<bool>,
-    pub stdout:            Option<bool>,
     pub outfolder:         Option<String>,
     pub content_selectors: Option<Vec<String>>,
     pub remove_selectors:  Option<Vec<String>>,
@@ -50,7 +48,6 @@ impl RawFeed {
             no_images: None,
             max_image_width: None,
             force: None,
-            stdout: None,
             outfolder: None,
             content_selectors: None,
             remove_selectors: None,
@@ -75,7 +72,6 @@ pub struct ResolvedFeedConfig {
     pub no_images:         bool,
     pub max_image_width:   u32,
     pub dbpath:            Option<String>,
-    pub stdout:            bool,
     pub kobo:              bool,
     pub outfolder:         Option<String>,
     pub content_selectors: Option<Vec<String>>,
@@ -105,7 +101,6 @@ pub fn merge(cli: &Args, defaults: &RawDefaults, feed: &RawFeed, config_dir: &Pa
         max_image_width: cli.max_image_width.or(feed.max_image_width).or(defaults.max_image_width).unwrap_or(460),
         dbpath:          cli.dbpath.clone()
                              .or_else(|| defaults.dbpath.as_deref().map(&resolve)),
-        stdout:          cli.stdout.or(feed.stdout).or(defaults.stdout).unwrap_or(false),
         kobo:            cli.kobo.or(feed.kobo).or(defaults.kobo).unwrap_or(false),
         outfolder:         cli.outfolder.as_deref().map(&resolve)
                                .or_else(|| feed.outfolder.as_deref().map(&resolve))
@@ -161,7 +156,6 @@ mod tests {
             no_images: None,
             max_image_width: None,
             dbpath: None,
-            stdout: None,
             kobo: None,
             outfolder: None,
             content_selectors: None,
@@ -239,7 +233,6 @@ mod tests {
         assert!(!cfg.no_images);
         assert_eq!(cfg.max_image_width, 460);
         assert!(!cfg.kobo);
-        assert!(!cfg.stdout);
         assert!(!cfg.report_times);
         assert!(cfg.limit.is_none());
     }
