@@ -44,15 +44,16 @@ fn resolve_db_path(cfg: &ResolvedFeedConfig) -> Result<PathBuf, AppError> {
 async fn run_feed(
     cfg: &ResolvedFeedConfig,
     client: &reqwest::Client,
-    conn: &mut rusqlite::Connection,
     log_file: Option<log::LogFile>,
 ) -> Result<(), AppError> {
+    let db_path = resolve_db_path(cfg)?;
+    let mut conn = cache::open_db(&db_path)?;
     let t_start = std::time::Instant::now();
     let run_log = LogSink::new(feed_log_prefix(&cfg.url)).with_file_opt(log_file.clone());
 
     // Per-feed prune (TTL + per-feed cap)
-    cache::prune(conn, &cfg.url)?;
-    let cached_urls: HashSet<String> = cache::get_cached_urls(conn, &cfg.url)?;
+    cache::prune(&conn, &cfg.url)?;
+    let cached_urls: HashSet<String> = cache::get_cached_urls(&conn, &cfg.url)?;
 
     let report_times = cfg.report_times;
 
@@ -83,7 +84,7 @@ async fn run_feed(
     let cached_sha1s: HashSet<String> = if cfg.no_images {
         HashSet::new()
     } else {
-        cache::get_cached_image_sha1s(conn)?
+        cache::get_cached_image_sha1s(&conn)?
     };
     let seen_sha1s = Arc::new(Mutex::new(cached_sha1s));
 
@@ -95,7 +96,7 @@ async fn run_feed(
     // Key covers by feed URL + name only (no date) so the expensive template is
     // reused across runs; only the date/time overlay is re-applied each time.
     let template_key         = format!("{}|{}", cfg.url, cfg.name.as_deref().unwrap_or(""));
-    let cover_template_cache = cache::get_cached_cover(conn, &template_key)?;
+    let cover_template_cache = cache::get_cached_cover(&conn, &template_key)?;
     let had_cached_template  = cover_template_cache.is_some();
 
     // Only fetch the favicon when we actually need to (re)build the template.
@@ -285,7 +286,7 @@ async fn run_feed(
     };
 
     if let Some(template) = cover_new_template {
-        let _ = cache::store_cover(conn, &template_key, &template);
+        let _ = cache::store_cover(&conn, &template_key, &template);
     }
 
     // ── Batch DB inserts (all on the main task — rusqlite is !Send) ───────────
@@ -304,7 +305,7 @@ async fn run_feed(
     // ── Load from DB (respects limit) ────────────────────────────────────────
 
     let t = std::time::Instant::now();
-    let all_articles = cache::load_articles(conn, &cfg.url, cfg.limit)?;
+    let all_articles = cache::load_articles(&conn, &cfg.url, cfg.limit)?;
     if report_times { run_log.println(&format!("[TIMING] db load ({} articles): {:?}", all_articles.len(), t.elapsed())); }
 
     if all_articles.is_empty() {
@@ -326,7 +327,7 @@ async fn run_feed(
                 .filter(|s| seen.insert(s.clone()))
                 .collect()
         };
-        cache::load_images(conn, &sha1s)?
+        cache::load_images(&conn, &sha1s)?
             .into_iter()
             .map(|img| (img.url_sha1.clone(), img))
             .collect()
@@ -435,14 +436,22 @@ async fn main() -> Result<(), AppError> {
         .connect_timeout(Duration::from_secs(5))
         .build()?;
 
-    let mut conn = cache::open_db(&db_path)?;
-    cache::prune_images(&conn)?;
+    cache::prune_images(&cache::open_db(&db_path)?)?;
 
-    for cfg in &feeds_to_run {
-        if let Err(e) = run_feed(cfg, &client, &mut conn, log_file.clone()).await {
-            eprintln!("{}: Error: {e}", feed_log_prefix(&cfg.url));
-        }
-    }
+    futures::stream::iter(feeds_to_run)
+        .map(|cfg| {
+            let client = client.clone();
+            let log_file = log_file.clone();
+            async move {
+                let url = cfg.url.clone();
+                if let Err(e) = run_feed(&cfg, &client, log_file).await {
+                    eprintln!("{}: Error: {e}", feed_log_prefix(&url));
+                }
+            }
+        })
+        .buffer_unordered(5)
+        .collect::<Vec<()>>()
+        .await;
 
     Ok(())
 }
