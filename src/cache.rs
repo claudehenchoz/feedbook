@@ -23,7 +23,7 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
         CREATE TABLE IF NOT EXISTS articles (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             feed_url    TEXT    NOT NULL,
-            article_url TEXT    NOT NULL UNIQUE,
+            article_url TEXT    NOT NULL,
             title       TEXT,
             author      TEXT,
             date_iso    TEXT,
