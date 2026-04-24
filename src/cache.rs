@@ -66,7 +66,7 @@ pub fn prune(conn: &Connection, feed_url: &str) -> Result<(), AppError> {
         [],
     )?;
     conn.execute(
-        "DELETE FROM covers WHERE created_at < (strftime('%s', 'now') - 2592000)",
+        "DELETE FROM covers WHERE created_at < (strftime('%s', 'now') - 7776000)",
         [],
     )?;
     Ok(())

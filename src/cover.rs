@@ -221,24 +221,33 @@ mod tests {
         assert!(!looks_like_image(&[0xFF, 0xD8]));
     }
 
-    // ── generate_cover ────────────────────────────────────────────────────────
+    // ── cover template + date apply ───────────────────────────────────────────
 
     #[test]
-    fn generate_cover_returns_valid_png() {
-        let result = generate_cover("Test Feed", None, None);
-        assert!(result.is_ok(), "generate_cover failed: {:?}", result);
+    fn generate_cover_template_returns_valid_png() {
+        let result = generate_cover_template("Test Feed", None);
+        assert!(result.is_ok(), "generate_cover_template failed: {:?}", result);
         let bytes = result.unwrap();
-        // PNG magic number: 89 50 4E 47 0D 0A 1A 0A
         assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
         assert!(bytes.len() > 1000, "cover PNG suspiciously small");
     }
 
     #[test]
-    fn generate_cover_with_date_succeeds() {
+    fn apply_date_to_cover_with_date_succeeds() {
+        let template = generate_cover_template("My Feed", None).unwrap();
         let date = chrono::DateTime::parse_from_rfc3339("2024-06-15T08:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let result = generate_cover("My Feed", Some(date), None);
+        let result = apply_date_to_cover(&template, Some(date));
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
+    }
+
+    #[test]
+    fn apply_date_to_cover_no_date_roundtrips() {
+        let template = generate_cover_template("Test Feed", None).unwrap();
+        let result = apply_date_to_cover(&template, None);
         assert!(result.is_ok());
     }
 }
@@ -291,59 +300,27 @@ fn looks_like_image(bytes: &[u8]) -> bool {
     false
 }
 
-/// Generates the cover image and returns it as PNG bytes.
-pub fn generate_cover(
+/// Generates the static cover template (title + favicon grid) without any date/time text.
+/// The title is constrained to end before x=800, leaving the top-right corner blank for the date.
+/// Store the result in the SQLite cover cache keyed by `"{feed_url}|{name}"`.
+pub fn generate_cover_template(
     title: &str,
-    date: Option<DateTime<Utc>>,
     favicon_data: Option<&[u8]>,
 ) -> Result<Vec<u8>, AppError> {
     let mut img = RgbaImage::from_pixel(W, H, Rgba([255, 255, 255, 255]));
     let font = FontRef::try_from_slice(FONT_BYTES)
         .map_err(|e| AppError::Other(format!("Font load error: {e}")))?;
 
-    // --- 1. Define Margins ---
-    let margin_x = 80.0; // This creates the "blank space" on the sides
-    let margin_bottom = 80.0; // This creates the "blank space" at the bottom
+    let margin_x      = 80.0f32;
+    let margin_bottom = 80.0f32;
 
-    // --- 2. Header Block: Title and Date ---
+    // Title must end before x=800 so the top-right date zone stays permanently blank.
+    let target_width = 800.0 - margin_x; // = 720 px
 
-    // A. Pre-calculate Date Strings and Width
-    let date_scale = PxScale::from(30.0);
-    let date_line_height = 36.0;
-    let mut max_date_w = 0.0;
-    
-    // We create a temporary scope to manage the lifetime of the string references
-    let date_strings = {
-        if let Some(d) = date {
-            let weekday = d.format("%A").to_string().to_lowercase();
-            let day_month_year = format!("{} {} {}", d.day(), d.format("%B").to_string().to_lowercase(), d.year());
-            let time_str = format!("{:02}:{:02}", d.hour(), d.minute());
-            
-            let lines = vec![weekday, day_month_year, time_str];
-            for line in &lines {
-                let line_w = measure_text_width(line, date_scale, &font);
-                if line_w > max_date_w {
-                    max_date_w = line_w;
-                }
-            }
-            lines // Return the strings to extend their life
-        } else {
-            Vec::new()
-        }
-    };
-
-    // B. Calculate Title Position (locked center)
-    let initial_scale = PxScale::from(140.0);
+    let initial_scale   = PxScale::from(140.0);
     let standard_ascent = font.as_scaled(initial_scale).ascent();
-    // We decide on a constant `title_v_center_y`. We calculate it based on
-    // the original code's top spacing of 60px for a standard ascent.
     let title_v_center_y = 80.0 + (standard_ascent / 2.0);
 
-    // C. Calculate Title Font Size to fit, and final baseline
-    // Reserve space for margins, the max width of the date block, and a 40px gap
-    let date_gap = if max_date_w > 0.0 { 40.0 } else { 0.0 };
-    let target_width = W as f32 - (margin_x * 2.0) - max_date_w - date_gap; 
-    
     let mut font_size: f32 = 140.0;
     while font_size > 40.0 {
         if measure_text_width(title, PxScale::from(font_size), &font) <= target_width {
@@ -351,19 +328,57 @@ pub fn generate_cover(
         }
         font_size -= 2.0;
     }
-    let title_scale = PxScale::from(font_size);
-    let title_ascent = font.as_scaled(title_scale).ascent();
+    let title_scale       = PxScale::from(font_size);
+    let title_ascent      = font.as_scaled(title_scale).ascent();
     let title_descent_abs = font.as_scaled(title_scale).descent().abs();
     let title_actual_height = title_ascent + title_descent_abs;
-    
-    // title_baseline = title_v_center_y + ((ascent + |descent|) / 2) - |descent|
-    let title_baseline = title_v_center_y + (title_actual_height / 2.0) - title_descent_abs;
-    
-    // Draw the title
+    let title_baseline    = title_v_center_y + (title_actual_height / 2.0) - title_descent_abs;
+
     draw_text(&mut img, title, margin_x, title_baseline, title_scale, Rgba([0, 0, 0, 255]), &font);
 
-    // D. Draw Date Block (positioning can stay the same as it's not problem)
-    if !date_strings.is_empty() {
+    let available_w     = W as f32 - (margin_x * 2.0);
+    let cell_size       = (available_w / COLS as f32) as u32;
+    let grid_total_h    = (cell_size * ROWS) as f32;
+    let title_bottom_y  = title_baseline + title_descent_abs;
+    let min_start_y     = title_bottom_y + 60.0;
+    let pattern_start_y = (H as f32 - margin_bottom - grid_total_h).max(min_start_y) as u32;
+
+    if cell_size > 0 {
+        if let Some(fav_bytes) = favicon_data {
+            if let Some(fav_rgba) = decode_and_resize_favicon(fav_bytes, cell_size, cell_size) {
+                draw_favicon_pattern(&mut img, &fav_rgba, cell_size, cell_size,
+                                     pattern_start_y, margin_x as u32);
+            }
+        }
+    }
+
+    encode_png_fast(&img)
+}
+
+/// Decodes a cached cover template PNG and overlays the current date/time in the top-right corner.
+/// This is the fast per-run step — no favicon fetch, no grid rendering.
+pub fn apply_date_to_cover(
+    template_png: &[u8],
+    date: Option<DateTime<Utc>>,
+) -> Result<Vec<u8>, AppError> {
+    let mut img = image::load_from_memory(template_png)
+        .map_err(|e| AppError::Other(format!("template PNG decode: {e}")))?
+        .into_rgba8();
+
+    if let Some(d) = date {
+        let font = FontRef::try_from_slice(FONT_BYTES)
+            .map_err(|e| AppError::Other(format!("Font load error: {e}")))?;
+
+        let margin_x         = 80.0f32;
+        let date_scale       = PxScale::from(30.0);
+        let date_line_height = 36.0f32;
+
+        let weekday        = d.format("%A").to_string().to_lowercase();
+        let day_month_year = format!("{} {} {}",
+            d.day(), d.format("%B").to_string().to_lowercase(), d.year());
+        let time_str       = format!("{:02}:{:02}", d.hour(), d.minute());
+        let date_strings   = [weekday, day_month_year, time_str];
+
         let date_ascent = font.as_scaled(date_scale).ascent();
         for (i, line) in date_strings.iter().enumerate() {
             let line_w = measure_text_width(line, date_scale, &font);
@@ -373,37 +388,9 @@ pub fn generate_cover(
         }
     }
 
-    // --- 3. Calculate Tiled Grid with Margins ---
-    
-    // Available width after margins
-    let available_w = W as f32 - (margin_x * 2.0);
-
-    // 1. Force square cells based strictly on the available width
-    let cell_size = (available_w / COLS as f32) as u32;
-
-    // 2. Calculate total height of the new perfectly square-celled grid
-    let grid_total_h = (cell_size * ROWS) as f32;
-
-    // 3. Shift the pattern down to anchor it to the bottom margin.
-    // We calculate `min_start_y` based on the actual bottom of the title's
-    // dynamic text slot. This ensures consistent spacing.
-    let title_bottom_y = title_baseline + font.as_scaled(title_scale).descent().abs();
-    let min_start_y = title_bottom_y + 60.0; 
-    
-    let pattern_start_y = (H as f32 - margin_bottom - grid_total_h).max(min_start_y) as u32;
-
-    if cell_size > 0 {
-        if let Some(fav_bytes) = favicon_data {
-            // 4. Pass cell_size for both width and height to keep it completely square
-            if let Some(fav_rgba) = decode_and_resize_favicon(fav_bytes, cell_size, cell_size) {
-                draw_favicon_pattern(&mut img, &fav_rgba, cell_size, cell_size, pattern_start_y, margin_x as u32);
-            }
-        }
-    }
-
-    let buf = encode_png_fast(&img)?;
-    Ok(buf)
+    encode_png_fast(&img)
 }
+
 
 // Simplified PNG encoding using the `png` crate, which is faster than `image`'s encoder.
 fn encode_png_fast(img: &RgbaImage) -> Result<Vec<u8>, AppError> {

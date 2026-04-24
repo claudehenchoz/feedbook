@@ -136,26 +136,33 @@ async fn run_feed(
         image_pb   = ipb;
     };
 
-    // ── Start favicon fetch immediately ──────────────────────────────────────
+    // ── Cover template cache check + conditional favicon spawn ───────────────
 
     // Use cfg.name as the cover title if provided, otherwise derive from URL
-    let domain_title    = cfg.name.clone().unwrap_or_else(|| cover::extract_domain_title(&cfg.url));
-    let client_favicon  = client.clone();
-    let url_for_favicon = cfg.url.clone();
-    let favicon_handle  = tokio::spawn(async move {
-        cover::fetch_favicon(&client_favicon, &url_for_favicon).await
-    });
+    let domain_title = cfg.name.clone().unwrap_or_else(|| cover::extract_domain_title(&cfg.url));
+
+    // Key covers by feed URL + name only (no date) so the expensive template is
+    // reused across runs; only the date/time overlay is re-applied each time.
+    let template_key         = format!("{}|{}", cfg.url, cfg.name.as_deref().unwrap_or(""));
+    let cover_template_cache = cache::get_cached_cover(conn, &template_key)?;
+    let had_cached_template  = cover_template_cache.is_some();
+
+    // Only fetch the favicon when we actually need to rebuild the template.
+    let favicon_handle: Option<tokio::task::JoinHandle<Option<Vec<u8>>>> =
+        if !had_cached_template {
+            let client_favicon  = client.clone();
+            let url_for_favicon = cfg.url.clone();
+            Some(tokio::spawn(async move {
+                cover::fetch_favicon(&client_favicon, &url_for_favicon).await
+            }))
+        } else {
+            None
+        };
 
     // ── Run article+image pipeline concurrently with cover generation ─────────
 
     let img_concurrency     = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 4 };
     let article_concurrency = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 5 };
-
-    // Include name in cover key so a name change busts the cached cover
-    let cover_key = format!("{}|{}|{}", cfg.url, cfg.name.as_deref().unwrap_or(""),
-        feed_date.map(|d| d.to_rfc3339()).unwrap_or_default());
-    let cover_from_cache = cache::get_cached_cover(conn, &cover_key)?;
-    let had_cached_cover = cover_from_cache.is_some();
 
     let no_images = cfg.no_images;
     let max_w     = cfg.max_image_width;
@@ -166,7 +173,7 @@ async fn run_feed(
         cfg.remove_selectors.as_ref().map(|v| Arc::new(v.clone()));
 
     let t_pipeline = std::time::Instant::now();
-    let (pipeline_result, cover_png) = tokio::join!(
+    let (pipeline_result, cover_result) = tokio::join!(
 
         // ── Arm A: per-article scrape → per-article image download ────────────
         {
@@ -351,7 +358,7 @@ async fn run_feed(
             }
         },
 
-        // ── Arm B: favicon fetch + cover generation ───────────────────────────
+        // ── Arm B: cover template (cached or generated) + date overlay ───────
         {
             let mp_cover     = mp.clone();
             let domain_title = domain_title.clone();
@@ -362,44 +369,62 @@ async fn run_feed(
                     sp.set_style(
                         ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap()
                     );
-                    sp.set_message("Fetching favicon...");
+                    sp.set_message(if had_cached_template { "Applying date to cover..." } else { "Fetching favicon..." });
                     sp
                 });
 
-                if let Some(cached) = cover_from_cache {
-                    if let Some(sp) = cover_sp {
-                        sp.finish_with_message("Cover cached");
-                        run_log.write_file("Cover cached");
-                    } else if stdout {
-                        run_log.println("Cover cached");
+                // ── 1. Get or build the static template ──────────────────────
+                let (template, new_template): (Vec<u8>, Option<Vec<u8>>) =
+                    if let Some(cached) = cover_template_cache {
+                        if let Some(ref sp) = cover_sp {
+                            sp.set_message("Cover template cached");
+                            run_log.write_file("Cover template cached");
+                        } else if stdout {
+                            run_log.println("Cover template cached");
+                        } else {
+                            run_log.write_file("Cover template cached");
+                        }
+                        if report_times { run_log.println("[TIMING] cover template: cached (skipped generation)"); }
+                        (cached, None)
                     } else {
-                        run_log.write_file("Cover cached");
-                    }
-                    if report_times { run_log.println(&format!("[TIMING] cover: cached (skipped generation)")); }
-                    return Some(cached);
-                }
+                        let t_favicon = std::time::Instant::now();
+                        let favicon = if let Some(h) = favicon_handle { h.await.ok().flatten() } else { None };
+                        if report_times { run_log.println(&format!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed())); }
 
-                let t_favicon = std::time::Instant::now();
-                let favicon = favicon_handle.await.ok().flatten();
-                if report_times { run_log.println(&format!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed())); }
+                        if let Some(ref sp) = cover_sp {
+                            sp.set_message("Generating cover template...");
+                            run_log.write_file("Generating cover template...");
+                        } else if stdout {
+                            run_log.println("Generating cover template...");
+                        } else {
+                            run_log.write_file("Generating cover template...");
+                        }
 
-                if let Some(ref sp) = cover_sp {
-                    sp.set_message("Generating cover...");
-                    run_log.write_file("Generating cover...");
-                } else if stdout {
-                    run_log.println("Generating cover...");
-                } else {
-                    run_log.write_file("Generating cover...");
-                }
-                let title_owned = domain_title;
-                let t_cover = std::time::Instant::now();
-                let result = tokio::task::spawn_blocking(move || {
-                    cover::generate_cover(&title_owned, feed_date, favicon.as_deref())
+                        let title_owned = domain_title;
+                        let t_cover = std::time::Instant::now();
+                        let tmpl = tokio::task::spawn_blocking(move || {
+                            cover::generate_cover_template(&title_owned, favicon.as_deref())
+                        })
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                        if report_times { run_log.println(&format!("[TIMING] cover template generate: {:?}", t_cover.elapsed())); }
+
+                        match tmpl {
+                            Some(t) => { let saved = t.clone(); (t, Some(saved)) }
+                            None    => return None,
+                        }
+                    };
+
+                // ── 2. Apply date/time overlay (fast: PNG decode + text + encode) ──
+                let t_apply = std::time::Instant::now();
+                let cover = tokio::task::spawn_blocking(move || {
+                    cover::apply_date_to_cover(&template, feed_date)
                 })
                 .await
                 .ok()
-                .and_then(|r| r.ok());
-                if report_times { run_log.println(&format!("[TIMING] cover generate: {:?}", t_cover.elapsed())); }
+                .and_then(|r| r.ok())?;
+                if report_times { run_log.println(&format!("[TIMING] cover date apply: {:?}", t_apply.elapsed())); }
 
                 if let Some(sp) = cover_sp {
                     sp.finish_with_message("Cover ready");
@@ -409,19 +434,23 @@ async fn run_feed(
                 } else {
                     run_log.write_file("Cover ready");
                 }
-                result
+
+                Some((cover, new_template))
             }
         },
     );
 
     if report_times { run_log.println(&format!("[TIMING] pipeline (articles + cover, concurrent): {:?}", t_pipeline.elapsed())); }
 
-    // ── Store newly generated cover in cache ──────────────────────────────────
+    // ── Destructure cover result and persist newly generated template ─────────
 
-    if !had_cached_cover {
-        if let Some(ref png) = cover_png {
-            let _ = cache::store_cover(conn, &cover_key, png);
-        }
+    let (cover_png, cover_new_template) = match cover_result {
+        Some((cover, tmpl)) => (Some(cover), tmpl),
+        None => (None, None),
+    };
+
+    if let Some(template) = cover_new_template {
+        let _ = cache::store_cover(conn, &template_key, &template);
     }
 
     // ── Batch DB inserts (all on the main task — rusqlite is !Send) ───────────
