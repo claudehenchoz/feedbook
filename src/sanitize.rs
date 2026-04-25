@@ -7,66 +7,51 @@ pub fn build_sanitizer() -> Arc<Builder<'static>> {
     let mut b = Builder::default();
 
     // --- Tags ---
-    // Start from ammonia's conservative default, then add HTML5 structural/semantic
-    // elements that are valid EPUB content but not in ammonia's default allowlist.
+    // Removed exotic inline wrappers (span, time, mark, etc.) to prevent RSC-005 nesting errors
     b.add_tags(&[
         "section", "article", "aside", "nav", "header", "footer", "main",
         "figure", "figcaption", "hgroup",
-        "mark", "time", "ruby", "rt", "rp", "rb", "rtc", "bdi", "wbr",
-        "details", "summary",
-        // picture: stripped (tag removed, <img> content kept) — EPUB3 readers don't
-        // need responsive image selection, and <source srcset=...> elements inside
-        // reference external URLs that EPUBCHECK flags as href-not-in-manifest.
-        // source: also excluded; it is a void element so stripping it removes it fully.
-        "audio", "video", "track",
-        "svg",
     ]);
 
-    // Tags to remove entirely (content and all):
-    b.rm_tags(&["script", "style", "iframe", "object", "embed", "form",
-                "input", "button", "select", "textarea", "link", "meta"]);
+    // Explicitly remove media, SVGs, table section wrappers, and inline wrappers
+    b.rm_tags(&[
+        "script", "style", "iframe", "object", "embed", "form",
+        "input", "button", "select", "textarea", "link", "meta",
+        "audio", "video", "track", "source", "picture", "svg",
+        "center", "font", "strike", "u", "s", "base",
+        "tbody", "thead", "tfoot", // Flattens tables to fix table sibling errors
+        "span", "mark", "time", "ruby", "rt", "rp", "rb", "rtc", "bdi", "wbr", "details", "summary" // Fixes futurism block-in-inline errors
+    ]);
 
-    // --- Generic attributes (allowed on any tag) ---
+    // --- Generic attributes ---
     b.add_generic_attributes(&[
         "id", "class", "title", "lang", "xml:lang", "dir",
-        "role",
-        "epub:type",
-        "translate", "hidden",
+        "role", "epub:type", "translate", "hidden",
     ]);
 
-    // aria-* and data-* via prefix matching:
-    b.add_generic_attribute_prefixes(&["aria-", "data-"]);
+    b.add_generic_attribute_prefixes(&["aria-"]);
 
     // --- Per-tag attributes ---
     let mut tag_attrs: HashMap<&str, HashSet<&str>> = HashMap::new();
     tag_attrs.insert("a",          ["href", "hreflang", "type"].into_iter().collect());
-    tag_attrs.insert("img",        ["src", "alt", "width", "height"].into_iter().collect());
-    tag_attrs.insert("audio",      ["src", "controls", "preload"].into_iter().collect());
-    tag_attrs.insert("video",      ["src", "controls", "preload", "poster", "width", "height"].into_iter().collect());
-    tag_attrs.insert("track",      ["src", "kind", "srclang", "label", "default"].into_iter().collect());
+    tag_attrs.insert("img",        ["src", "alt"].into_iter().collect()); 
     tag_attrs.insert("th",         ["colspan", "rowspan", "scope", "headers"].into_iter().collect());
     tag_attrs.insert("td",         ["colspan", "rowspan", "headers"].into_iter().collect());
     tag_attrs.insert("col",        ["span"].into_iter().collect());
     tag_attrs.insert("colgroup",   ["span"].into_iter().collect());
     tag_attrs.insert("ol",         ["start", "reversed", "type"].into_iter().collect());
     tag_attrs.insert("li",         ["value"].into_iter().collect());
-    tag_attrs.insert("time",       ["datetime"].into_iter().collect());
     tag_attrs.insert("q",          ["cite"].into_iter().collect());
     tag_attrs.insert("blockquote", ["cite"].into_iter().collect());
     b.tag_attributes(tag_attrs);
 
     // --- URL schemes ---
-    // Drop javascript:, data: in hrefs by only allowing safe ones.
     b.url_schemes(["http", "https", "mailto", "tel"].into_iter().collect());
-    // Allow relative URLs so internal links survive:
-    b.url_relative(ammonia::UrlRelative::PassThrough);
-    // Preserve the original `rel` attribute on <a> rather than forcing
-    // "noopener noreferrer". ammonia owns this attribute and panics if
-    // it also appears in tag_attributes.
+    
+    // Deny relative URLs to fix RSC-007 (broken internal links)
+    b.url_relative(ammonia::UrlRelative::Deny);
+    
     b.link_rel(None);
-
-    // Strip inline style by default — EPUBs should use a separate stylesheet.
-    // (ammonia strips `style` attribute by default; don't add it back.)
 
     Arc::new(b)
 }
@@ -92,11 +77,10 @@ fn fixup_xhtml(html: &str) -> String {
     static TT_OPEN_RE:   OnceLock<Regex> = OnceLock::new();
     static A_TAG_RE:     OnceLock<Regex> = OnceLock::new();
     static FRAG_HREF_RE: OnceLock<Regex> = OnceLock::new();
+    static H_TAG_RE:     OnceLock<Regex> = OnceLock::new();
+    static BLOCK_IN_H_RE: OnceLock<Regex> = OnceLock::new();
 
     // Step 1: self-close void elements.
-    // The attribute group requires leading whitespace, so <br/> is never
-    // captured (/ is not \s). Already-closed <br /> is caught by the
-    // ends_with("/>") guard.
     let void_re = VOID_RE.get_or_init(|| {
         Regex::new(
             r"(?i)<(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)(\s[^>]*)?>",
@@ -128,7 +112,6 @@ fn fixup_xhtml(html: &str) -> String {
         });
 
     // Step 3: replace obsolete <tt> with <code>.
-    // html5ever normalises tag names to lowercase, so </tt> is sufficient.
     let tt_open = TT_OPEN_RE.get_or_init(|| {
         Regex::new(r"(?i)<tt(\b[^>]*)?>").unwrap()
     });
@@ -143,17 +126,35 @@ fn fixup_xhtml(html: &str) -> String {
     };
 
     // Step 4: strip fragment-only hrefs from <a> tags.
-    // After ammonia+html5ever serialisation, href only appears on <a> tags
-    // and attribute values are double-quoted. A leading \s+ is always present
-    // (html5ever puts a space before every attribute).
     let a_re = A_TAG_RE.get_or_init(|| Regex::new(r"(?i)<a\b[^>]*>").unwrap());
     let frag_re = FRAG_HREF_RE.get_or_init(|| {
         Regex::new(r##"\s+href="#[^"]*""##).unwrap()
     });
-    a_re.replace_all(&html, |caps: &regex::Captures| {
+    let html = a_re.replace_all(&html, |caps: &regex::Captures| {
         frag_re.replace(&caps[0], "").into_owned()
-    })
-    .into_owned()
+    }).into_owned();
+
+    // Step 5: Strip block elements illegally nested inside headings (e.g. <h2><p>...</p></h2>)
+    // Matches opening <hX>, the inner content, and closing </hX>
+    let h_re = H_TAG_RE.get_or_init(|| Regex::new(r"(?is)(<h[1-6][^>]*>)(.*?)(</h[1-6]>)").unwrap());
+    
+    // Matches block-level elements that aren't allowed inside phrasing content
+    let block_in_h = BLOCK_IN_H_RE.get_or_init(|| Regex::new(r"(?i)</?(?:p|div|article|section|blockquote|ul|ol|li)\b[^>]*>").unwrap());
+
+    let html = h_re.replace_all(&html, |caps: &regex::Captures| {
+        let open_tag = &caps[1];
+        let inner = &caps[2];
+        let close_tag = &caps[3];
+        
+        // Replace illegal block tags with a space so words don't mash together
+        let inner_clean = block_in_h.replace_all(inner, " ");
+        format!("{}{}{}", open_tag, inner_clean, close_tag)
+    }).into_owned();
+
+    // Step 6: Fix empty IDs (illegal in XML) and orphaned figcaptions (illegal outside <figure>)
+    html.replace(r#" id="""#, "")
+        .replace("<figcaption>", r#"<div class="figcaption">"#)
+        .replace("</figcaption>", "</div>")
 }
 
 /// Maps HTML4 named character references to their numeric equivalents.

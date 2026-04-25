@@ -126,22 +126,36 @@ pub fn rewrite_img_srcs(html: &str, src_to_filename: &HashMap<String, String>) -
 pub fn strip_external_imgs(html: &str) -> String {
     static IMG_TAG_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     static EXT_SRC_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static HAS_SRC_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
 
     let tag_re = IMG_TAG_RE.get_or_init(|| {
         // Matches complete self-closing <img ... /> tags (XHTML output from fixup_xhtml)
         Regex::new(r#"(?i)<img\b[^>]*/>"#).unwrap()
     });
-    let src_re = EXT_SRC_RE.get_or_init(|| {
+    
+    let ext_src_re = EXT_SRC_RE.get_or_init(|| {
         Regex::new(r#"(?i)\bsrc="https?://"#).unwrap()
+    });
+
+    let has_src_re = HAS_SRC_RE.get_or_init(|| {
+        Regex::new(r#"(?i)\bsrc="#).unwrap()
     });
 
     tag_re.replace_all(html, |caps: &regex::Captures| {
         let tag = &caps[0];
-        if src_re.is_match(tag) {
-            String::new() // drop tag — external URL that wasn't embedded
-        } else {
-            tag.to_string()
+        
+        // 1. Drop the tag if it has an external URL that wasn't embedded
+        if ext_src_re.is_match(tag) {
+            return String::new();
         }
+        
+        // 2. Drop the tag if it is completely missing a src attribute
+        if !has_src_re.is_match(tag) {
+            return String::new();
+        }
+
+        // 3. Otherwise, it's a valid local image — keep it
+        tag.to_string()
     })
     .into_owned()
 }
