@@ -42,11 +42,22 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
         CREATE INDEX IF NOT EXISTS idx_images_fetched_at ON images(fetched_at);
         CREATE TABLE IF NOT EXISTS covers (
             cache_key  TEXT    PRIMARY KEY,
+            width      INTEGER NOT NULL DEFAULT 0,
+            height     INTEGER NOT NULL DEFAULT 0,
             data       BLOB    NOT NULL,
             created_at INTEGER NOT NULL
         );",
     )?;
+    // Migrations for existing installs — succeed on upgrade, ignored on fresh create
+    let _ = conn.execute_batch("ALTER TABLE covers ADD COLUMN width  INTEGER NOT NULL DEFAULT 0");
+    let _ = conn.execute_batch("ALTER TABLE covers ADD COLUMN height INTEGER NOT NULL DEFAULT 0");
     Ok(conn)
+}
+
+pub struct CachedTemplate {
+    pub width:  u32,
+    pub height: u32,
+    pub data:   Vec<u8>,
 }
 
 pub fn prune(conn: &Connection, feed_url: &str) -> Result<(), AppError> {
@@ -193,21 +204,23 @@ pub fn load_images(conn: &Connection, sha1s: &[String]) -> Result<Vec<ProcessedI
     Ok(images)
 }
 
-pub fn get_cached_cover(conn: &Connection, key: &str) -> Result<Option<Vec<u8>>, AppError> {
-    let mut stmt = conn.prepare("SELECT data FROM covers WHERE cache_key = ?1")?;
+pub fn get_cached_cover(conn: &Connection, key: &str) -> Result<Option<CachedTemplate>, AppError> {
+    let mut stmt = conn.prepare("SELECT width, height, data FROM covers WHERE cache_key = ?1")?;
     let mut rows = stmt.query(params![key])?;
     if let Some(row) = rows.next()? {
-        let data: Vec<u8> = row.get(0)?;
-        return Ok(Some(data));
+        let width:  u32     = row.get(0)?;
+        let height: u32     = row.get(1)?;
+        let data:   Vec<u8> = row.get(2)?;
+        return Ok(Some(CachedTemplate { width, height, data }));
     }
     Ok(None)
 }
 
-pub fn store_cover(conn: &Connection, key: &str, data: &[u8]) -> Result<(), AppError> {
+pub fn store_cover(conn: &Connection, key: &str, width: u32, height: u32, data: &[u8]) -> Result<(), AppError> {
     let created_at = Utc::now().timestamp();
     conn.execute(
-        "INSERT OR REPLACE INTO covers (cache_key, data, created_at) VALUES (?1, ?2, ?3)",
-        params![key, data, created_at],
+        "INSERT OR REPLACE INTO covers (cache_key, width, height, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![key, width, height, data, created_at],
     )?;
     Ok(())
 }
@@ -357,7 +370,7 @@ mod tests {
     #[test]
     fn prune_covers_by_age() {
         let conn = mem_db();
-        store_cover(&conn, "old-cover", b"data").unwrap();
+        store_cover(&conn, "old-cover", 1, 1, b"\0\0\0\0").unwrap();
         conn.execute("UPDATE covers SET created_at = 0 WHERE cache_key = 'old-cover'", []).unwrap();
         prune(&conn, "https://example.com/feed").unwrap();
         let result = get_cached_cover(&conn, "old-cover").unwrap();
@@ -412,10 +425,12 @@ mod tests {
     #[test]
     fn store_and_get_cover() {
         let conn = mem_db();
-        let data = b"PNG_DATA_HERE";
-        store_cover(&conn, "my-cover", data).unwrap();
-        let result = get_cached_cover(&conn, "my-cover").unwrap();
-        assert_eq!(result.as_deref(), Some(data.as_ref()));
+        let data = vec![0u8; 100 * 200 * 4];
+        store_cover(&conn, "my-cover", 100, 200, &data).unwrap();
+        let result = get_cached_cover(&conn, "my-cover").unwrap().unwrap();
+        assert_eq!(result.width, 100);
+        assert_eq!(result.height, 200);
+        assert_eq!(result.data.len(), 100 * 200 * 4);
     }
 
     #[test]

@@ -231,11 +231,11 @@ async fn run_feed(
             let run_log = run_log.clone();
             async move {
                 // ── 1. Get or build the static template ──────────────────────
-                let (template, new_template): (Vec<u8>, Option<Vec<u8>>) =
+                let (template, new_template): (cover::CoverTemplate, Option<cover::CoverTemplate>) =
                     if let Some(cached) = cover_template_cache {
                         run_log.println("Cover template cached");
                         if report_times { run_log.println("[TIMING] cover template: cached (skipped generation)"); }
-                        (cached, None)
+                        (cover::CoverTemplate { width: cached.width, height: cached.height, rgba: cached.data }, None)
                     } else {
                         let t_favicon = std::time::Instant::now();
                         let favicon = if let Some(h) = favicon_handle { h.await.ok().flatten() } else { None };
@@ -254,8 +254,12 @@ async fn run_feed(
                         if report_times { run_log.println(&format!("[TIMING] cover template generate: {:?}", t_cover.elapsed())); }
 
                         match tmpl {
-                            Some(t) => { let saved = t.clone(); (t, Some(saved)) }
-                            None    => return None,
+                            Some(t) => {
+                                // ~8 MB memcpy — much cheaper than the PNG decode it replaces
+                                let saved = t.clone();
+                                (t, Some(saved))
+                            }
+                            None => return None,
                         }
                     };
 
@@ -286,7 +290,7 @@ async fn run_feed(
     };
 
     if let Some(template) = cover_new_template {
-        let _ = cache::store_cover(&conn, &template_key, &template);
+        let _ = cache::store_cover(&conn, &template_key, template.width, template.height, &template.rgba);
     }
 
     // ── Batch DB inserts (all on the main task — rusqlite is !Send) ───────────

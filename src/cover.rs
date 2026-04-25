@@ -5,7 +5,7 @@ use crate::error::AppError;
 
 static FONT_BYTES: &[u8] = include_bytes!("../assets/texgyreheros-bold.otf");
 
-const W: u32 = 1262;
+const W: u32 = 1264;
 const H: u32 = 1680;
 const COLS: u32 = 9;
 const ROWS: u32 = 11;
@@ -227,9 +227,10 @@ mod tests {
     fn generate_cover_template_returns_valid_png() {
         let result = generate_cover_template("Test Feed", None);
         assert!(result.is_ok(), "generate_cover_template failed: {:?}", result);
-        let bytes = result.unwrap();
-        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
-        assert!(bytes.len() > 1000, "cover PNG suspiciously small");
+        let tmpl = result.unwrap();
+        assert_eq!(tmpl.width, W);
+        assert_eq!(tmpl.height, H);
+        assert_eq!(tmpl.rgba.len(), (W * H * 4) as usize);
     }
 
     #[test]
@@ -302,11 +303,18 @@ fn looks_like_image(bytes: &[u8]) -> bool {
 
 /// Generates the static cover template (title + favicon grid) without any date/time text.
 /// The title is constrained to end before x=800, leaving the top-right corner blank for the date.
+#[derive(Clone, Debug)]
+pub struct CoverTemplate {
+    pub width:  u32,
+    pub height: u32,
+    pub rgba:   Vec<u8>,
+}
+
 /// Store the result in the SQLite cover cache keyed by `"{feed_url}|{name}"`.
 pub fn generate_cover_template(
     title: &str,
     favicon_data: Option<&[u8]>,
-) -> Result<Vec<u8>, AppError> {
+) -> Result<CoverTemplate, AppError> {
     let mut img = RgbaImage::from_pixel(W, H, Rgba([255, 255, 255, 255]));
     let font = FontRef::try_from_slice(FONT_BYTES)
         .map_err(|e| AppError::Other(format!("Font load error: {e}")))?;
@@ -352,18 +360,17 @@ pub fn generate_cover_template(
         }
     }
 
-    encode_png_fast(&img)
+    Ok(CoverTemplate { width: img.width(), height: img.height(), rgba: img.into_raw() })
 }
 
-/// Decodes a cached cover template PNG and overlays the current date/time in the top-right corner.
-/// This is the fast per-run step — no favicon fetch, no grid rendering.
+/// Overlays the current date/time on a raw-RGBA cover template.
+/// This is the fast per-run step — no favicon fetch, no grid rendering, no PNG decode.
 pub fn apply_date_to_cover(
-    template_png: &[u8],
+    template: &CoverTemplate,
     date: Option<DateTime<Utc>>,
 ) -> Result<Vec<u8>, AppError> {
-    let mut img = image::load_from_memory(template_png)
-        .map_err(|e| AppError::Other(format!("template PNG decode: {e}")))?
-        .into_rgba8();
+    let mut img = RgbaImage::from_raw(template.width, template.height, template.rgba.clone())
+        .ok_or_else(|| AppError::Other("cover template: invalid dimensions".to_string()))?;
 
     if let Some(d) = date {
         let font = FontRef::try_from_slice(FONT_BYTES)
