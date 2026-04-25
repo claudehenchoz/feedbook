@@ -41,6 +41,29 @@ fn resolve_db_path(cfg: &ResolvedFeedConfig) -> Result<PathBuf, AppError> {
     }
 }
 
+fn compute_fingerprint(
+    feed_title: &str,
+    articles: &[scraper::ScrapedArticle],
+    cfg: &ResolvedFeedConfig,
+) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(b"v1\n");
+    h.update(feed_title.as_bytes());
+    h.update(b"\n");
+    for article in articles {
+        h.update(article.url.as_bytes());
+        h.update(b"\x1f");
+    }
+    h.update(b"\x1e");
+    h.update(format!("kobo={}\n", cfg.kobo).as_bytes());
+    h.update(format!("no_images={}\n", cfg.no_images).as_bytes());
+    h.update(format!("max_image_width={}\n", cfg.max_image_width).as_bytes());
+    h.update(format!("content_selectors={:?}\n", cfg.content_selectors).as_bytes());
+    h.update(format!("remove_selectors={:?}\n", cfg.remove_selectors).as_bytes());
+    hex::encode(h.finalize())
+}
+
 async fn run_feed(
     cfg: &ResolvedFeedConfig,
     client: &reqwest::Client,
@@ -88,7 +111,7 @@ async fn run_feed(
     };
     let seen_sha1s = Arc::new(Mutex::new(cached_sha1s));
 
-    // ── Cover template cache check + conditional favicon spawn ───────────────
+    // ── Cover template cache check ────────────────────────────────────────────
 
     // Use cfg.name as the cover title if provided, otherwise derive from URL
     let domain_title = cfg.name.clone().unwrap_or_else(|| cover::extract_domain_title(&cfg.url));
@@ -99,19 +122,7 @@ async fn run_feed(
     let cover_template_cache = cache::get_cached_cover(&conn, &template_key)?;
     let had_cached_template  = cover_template_cache.is_some();
 
-    // Only fetch the favicon when we actually need to (re)build the template.
-    let favicon_handle: Option<tokio::task::JoinHandle<Option<Vec<u8>>>> =
-        if !had_cached_template {
-            let client_favicon  = client.clone();
-            let url_for_favicon = cfg.url.clone();
-            Some(tokio::spawn(async move {
-                cover::fetch_favicon(&client_favicon, &url_for_favicon).await
-            }))
-        } else {
-            None
-        };
-
-    // ── Run article+image pipeline concurrently with cover generation ─────────
+    // ── Arm A: per-article scrape → per-article image download ───────────────
 
     let img_concurrency     = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 4 };
     let article_concurrency = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 5 };
@@ -124,22 +135,28 @@ async fn run_feed(
         cfg.remove_selectors.as_ref().map(|v| Arc::new(v.clone()));
 
     let t_pipeline = std::time::Instant::now();
-    let (pipeline_result, cover_result) = tokio::join!(
-
-        // ── Arm A: per-article scrape → per-article image download ────────────
-        {
-            let run_log           = run_log.clone();
-            let client            = client.clone();
-            let host_times        = host_times.clone();
-            let image_sem         = image_sem.clone();
-            let seen_sha1s        = seen_sha1s.clone();
-            let sanitizer         = sanitizer.clone();
-            let content_selectors = content_selectors.clone();
-            let remove_selectors  = remove_selectors.clone();
-            async move {
-                let results: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> =
-                    futures::stream::iter(to_fetch)
-                        .map({
+    let pipeline_result: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> = {
+        let run_log           = run_log.clone();
+        let client            = client.clone();
+        let host_times        = host_times.clone();
+        let image_sem         = image_sem.clone();
+        let seen_sha1s        = seen_sha1s.clone();
+        let sanitizer         = sanitizer.clone();
+        let content_selectors = content_selectors.clone();
+        let remove_selectors  = remove_selectors.clone();
+        async move {
+            let results: Vec<(scraper::ScrapedArticle, Vec<images::ProcessedImage>)> =
+                futures::stream::iter(to_fetch)
+                    .map({
+                        let run_log           = run_log.clone();
+                        let client            = client.clone();
+                        let host_times        = host_times.clone();
+                        let image_sem         = image_sem.clone();
+                        let seen_sha1s        = seen_sha1s.clone();
+                        let sanitizer         = sanitizer.clone();
+                        let content_selectors = content_selectors.clone();
+                        let remove_selectors  = remove_selectors.clone();
+                        move |item| {
                             let run_log           = run_log.clone();
                             let client            = client.clone();
                             let host_times        = host_times.clone();
@@ -148,150 +165,75 @@ async fn run_feed(
                             let sanitizer         = sanitizer.clone();
                             let content_selectors = content_selectors.clone();
                             let remove_selectors  = remove_selectors.clone();
-                            move |item| {
-                                let run_log           = run_log.clone();
-                                let client            = client.clone();
-                                let host_times        = host_times.clone();
-                                let image_sem         = image_sem.clone();
-                                let seen_sha1s        = seen_sha1s.clone();
-                                let sanitizer         = sanitizer.clone();
-                                let content_selectors = content_selectors.clone();
-                                let remove_selectors  = remove_selectors.clone();
-                                async move {
-                                    let item_url = item.url.clone();
-                                    let maybe_article = scraper::scrape_article(
-                                        &client, item, sanitizer, &host_times, run_log.clone(),
-                                        content_selectors, remove_selectors,
-                                    ).await;
+                            async move {
+                                let item_url = item.url.clone();
+                                let maybe_article = scraper::scrape_article(
+                                    &client, item, sanitizer, &host_times, run_log.clone(),
+                                    content_selectors, remove_selectors,
+                                ).await;
 
-                                    let label = maybe_article.as_ref()
-                                        .and_then(|a| a.title.as_deref())
-                                        .unwrap_or(&item_url);
-                                    run_log.println(&format!("Article: {}", label));
+                                let label = maybe_article.as_ref()
+                                    .and_then(|a| a.title.as_deref())
+                                    .unwrap_or(&item_url);
+                                run_log.println(&format!("Article: {}", label));
 
-                                    let article = maybe_article?;
+                                let article = maybe_article?;
 
-                                    // ── Per-article image pipeline ────────────
-                                    let article_images = if no_images || article.html.is_none() {
-                                        vec![]
-                                    } else {
-                                        let img_urls = images::extract_image_urls(
-                                            article.html.as_deref().unwrap_or(""),
-                                            &article.url,
-                                        );
+                                // ── Per-article image pipeline ────────────
+                                let article_images = if no_images || article.html.is_none() {
+                                    vec![]
+                                } else {
+                                    let img_urls = images::extract_image_urls(
+                                        article.html.as_deref().unwrap_or(""),
+                                        &article.url,
+                                    );
 
-                                        let to_download = {
-                                            let mut seen = seen_sha1s.lock().await;
-                                            img_urls
-                                                .into_iter()
-                                                .filter(|(_, u)| seen.insert(images::url_sha1(u)))
-                                                .collect::<Vec<_>>()
-                                        };
+                                    let to_download = {
+                                        let mut seen = seen_sha1s.lock().await;
+                                        img_urls
+                                            .into_iter()
+                                            .filter(|(_, u)| seen.insert(images::url_sha1(u)))
+                                            .collect::<Vec<_>>()
+                                    };
 
-                                        futures::stream::iter(to_download)
-                                            .map({
+                                    futures::stream::iter(to_download)
+                                        .map({
+                                            let client     = client.clone();
+                                            let host_times = host_times.clone();
+                                            let image_sem  = image_sem.clone();
+                                            let run_log    = run_log.clone();
+                                            move |(raw_src, abs_url)| {
                                                 let client     = client.clone();
                                                 let host_times = host_times.clone();
                                                 let image_sem  = image_sem.clone();
                                                 let run_log    = run_log.clone();
-                                                move |(raw_src, abs_url)| {
-                                                    let client     = client.clone();
-                                                    let host_times = host_times.clone();
-                                                    let image_sem  = image_sem.clone();
-                                                    let run_log    = run_log.clone();
-                                                    async move {
-                                                        images::download_image(
-                                                            &client, raw_src, abs_url,
-                                                            max_w, &host_times, &image_sem,
-                                                            run_log,
-                                                        ).await
-                                                    }
+                                                async move {
+                                                    images::download_image(
+                                                        &client, raw_src, abs_url,
+                                                        max_w, &host_times, &image_sem,
+                                                        run_log,
+                                                    ).await
                                                 }
-                                            })
-                                            .buffer_unordered(img_concurrency)
-                                            .filter_map(|r| async move { r })
-                                            .collect::<Vec<_>>()
-                                            .await
-                                    };
+                                            }
+                                        })
+                                        .buffer_unordered(img_concurrency)
+                                        .filter_map(|r| async move { r })
+                                        .collect::<Vec<_>>()
+                                        .await
+                                };
 
-                                    Some((article, article_images))
-                                }
+                                Some((article, article_images))
                             }
-                        })
-                        .buffer_unordered(article_concurrency)
-                        .filter_map(|r| async move { r })
-                        .collect::<Vec<_>>()
-                        .await;
-                results
-            }
-        },
-
-        // ── Arm B: cover template (cached or generated) + date overlay ───────
-        {
-            let run_log = run_log.clone();
-            async move {
-                // ── 1. Get or build the static template ──────────────────────
-                let (template, new_template): (cover::CoverTemplate, Option<cover::CoverTemplate>) =
-                    if let Some(cached) = cover_template_cache {
-                        run_log.println("Cover template cached");
-                        if report_times { run_log.println("[TIMING] cover template: cached (skipped generation)"); }
-                        (cover::CoverTemplate { width: cached.width, height: cached.height, rgba: cached.data }, None)
-                    } else {
-                        let t_favicon = std::time::Instant::now();
-                        let favicon = if let Some(h) = favicon_handle { h.await.ok().flatten() } else { None };
-                        if report_times { run_log.println(&format!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed())); }
-
-                        run_log.println("Generating cover template...");
-
-                        let title_owned = domain_title;
-                        let t_cover = std::time::Instant::now();
-                        let tmpl = tokio::task::spawn_blocking(move || {
-                            cover::generate_cover_template(&title_owned, favicon.as_deref())
-                        })
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok());
-                        if report_times { run_log.println(&format!("[TIMING] cover template generate: {:?}", t_cover.elapsed())); }
-
-                        match tmpl {
-                            Some(t) => {
-                                // ~8 MB memcpy — much cheaper than the PNG decode it replaces
-                                let saved = t.clone();
-                                (t, Some(saved))
-                            }
-                            None => return None,
                         }
-                    };
-
-                // ── 2. Apply date/time overlay (fast: PNG decode + text + encode) ──
-                let t_apply = std::time::Instant::now();
-                let cover = tokio::task::spawn_blocking(move || {
-                    cover::apply_date_to_cover(&template, feed_date)
-                })
-                .await
-                .ok()
-                .and_then(|r| r.ok())?;
-                if report_times { run_log.println(&format!("[TIMING] cover date apply: {:?}", t_apply.elapsed())); }
-
-                run_log.println("Cover ready");
-
-                Some((cover, new_template))
-            }
-        },
-    );
-
-    if report_times { run_log.println(&format!("[TIMING] pipeline (articles + cover, concurrent): {:?}", t_pipeline.elapsed())); }
-
-    // ── Destructure cover result and persist newly generated template ─────────
-
-    let (cover_png, cover_new_template) = match cover_result {
-        Some((cover, tmpl)) => (Some(cover), tmpl),
-        None => (None, None),
-    };
-
-    if let Some(template) = cover_new_template {
-        let _ = cache::store_cover(&conn, &template_key, template.width, template.height, &template.rgba);
-    }
+                    })
+                    .buffer_unordered(article_concurrency)
+                    .filter_map(|r| async move { r })
+                    .collect::<Vec<_>>()
+                    .await;
+            results
+        }
+    }.await;
+    if report_times { run_log.println(&format!("[TIMING] article pipeline: {:?}", t_pipeline.elapsed())); }
 
     // ── Batch DB inserts (all on the main task — rusqlite is !Send) ───────────
 
@@ -317,7 +259,30 @@ async fn run_feed(
         return Ok(());
     }
 
-    // Collect the images referenced by the EPUB articles
+    // ── Compute output path (needed before skip check for the log message) ────
+
+    let output_path_base = epub::derive_output_path(&feed_title, cfg.kobo);
+    let output_path = if let Some(ref folder) = cfg.outfolder {
+        PathBuf::from(folder).join(&output_path_base)
+    } else {
+        output_path_base
+    };
+    let output_display = output_path.display().to_string();
+
+    // ── Fingerprint + skip check ──────────────────────────────────────────────
+
+    let fingerprint = compute_fingerprint(&feed_title, &all_articles, cfg);
+    if !cfg.force {
+        if let Some((prev_fp, prev_path)) = cache::get_fingerprint(&conn, &cfg.url)? {
+            if prev_fp == fingerprint && Path::new(&prev_path).exists() {
+                run_log.println(&format!("Unchanged, skipping rebuild: {}", prev_path));
+                return Ok(());
+            }
+        }
+    }
+
+    // ── Collect images referenced by the EPUB articles ────────────────────────
+
     let epub_images: HashMap<String, images::ProcessedImage> = if cfg.no_images {
         HashMap::new()
     } else {
@@ -337,20 +302,81 @@ async fn run_feed(
             .collect()
     };
 
+    // ── Arm B: cover template (cached or generated) + date overlay ───────────
+    // Favicon is spawned here, only when we're committed to building.
+
+    let favicon_handle: Option<tokio::task::JoinHandle<Option<Vec<u8>>>> =
+        if !had_cached_template {
+            let client_favicon  = client.clone();
+            let url_for_favicon = cfg.url.clone();
+            Some(tokio::spawn(async move {
+                cover::fetch_favicon(&client_favicon, &url_for_favicon).await
+            }))
+        } else {
+            None
+        };
+
+    let (cover_png, cover_new_template) = {
+        // ── 1. Get or build the static template ──────────────────────────────
+        let (template, new_template): (cover::CoverTemplate, Option<cover::CoverTemplate>) =
+            if let Some(cached) = cover_template_cache {
+                run_log.println("Cover template cached");
+                if report_times { run_log.println("[TIMING] cover template: cached (skipped generation)"); }
+                (cover::CoverTemplate { width: cached.width, height: cached.height, rgba: cached.data }, None)
+            } else {
+                let t_favicon = std::time::Instant::now();
+                let favicon = if let Some(h) = favicon_handle { h.await.ok().flatten() } else { None };
+                if report_times { run_log.println(&format!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed())); }
+
+                run_log.println("Generating cover template...");
+
+                let title_owned = domain_title;
+                let t_cover = std::time::Instant::now();
+                let tmpl = tokio::task::spawn_blocking(move || {
+                    cover::generate_cover_template(&title_owned, favicon.as_deref())
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+                if report_times { run_log.println(&format!("[TIMING] cover template generate: {:?}", t_cover.elapsed())); }
+
+                match tmpl {
+                    Some(t) => {
+                        // ~8 MB memcpy — much cheaper than the PNG decode it replaces
+                        let saved = t.clone();
+                        (t, Some(saved))
+                    }
+                    None => return Ok(()),
+                }
+            };
+
+        // ── 2. Apply date/time overlay ────────────────────────────────────────
+        let t_apply = std::time::Instant::now();
+        let cover = tokio::task::spawn_blocking(move || {
+            cover::apply_date_to_cover(&template, feed_date)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+        if report_times { run_log.println(&format!("[TIMING] cover date apply: {:?}", t_apply.elapsed())); }
+
+        run_log.println("Cover ready");
+
+        (cover, new_template)
+    };
+
+    if let Some(template) = cover_new_template {
+        let _ = cache::store_cover(&conn, &template_key, template.width, template.height, &template.rgba);
+    }
+
     // ── Build EPUB / KEPUB ────────────────────────────────────────────────────
 
     run_log.println(&format!("Building {} ({} articles)...",
         if cfg.kobo { "KEPUB" } else { "EPUB" }, all_articles.len()));
 
-    let output_path = epub::derive_output_path(&feed_title, cfg.kobo);
-    let output_path = if let Some(ref folder) = cfg.outfolder {
-        let dir = PathBuf::from(folder);
-        std::fs::create_dir_all(&dir)?;
-        dir.join(output_path)
-    } else {
-        output_path
-    };
-    let output_display = output_path.display().to_string();
+    if let Some(ref folder) = cfg.outfolder {
+        std::fs::create_dir_all(PathBuf::from(folder))?;
+    }
     let kobo = cfg.kobo;
 
     let t = std::time::Instant::now();
@@ -367,6 +393,8 @@ async fn run_feed(
     }
 
     run_log.println(&format!("Written: {}", output_display));
+
+    cache::store_fingerprint(&conn, &cfg.url, &fingerprint, &output_display)?;
 
     Ok(())
 }
@@ -458,4 +486,103 @@ async fn main() -> Result<(), AppError> {
         .await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_cfg() -> ResolvedFeedConfig {
+        ResolvedFeedConfig {
+            url: "https://example.com/feed".to_string(),
+            name: None,
+            limit: None,
+            force: false,
+            no_images: false,
+            max_image_width: 460,
+            dbpath: None,
+            kobo: true,
+            outfolder: None,
+            content_selectors: None,
+            remove_selectors: None,
+            report_times: false,
+        }
+    }
+
+    fn make_article(url: &str) -> scraper::ScrapedArticle {
+        scraper::ScrapedArticle {
+            url: url.to_string(),
+            title: None,
+            author: None,
+            date: None,
+            html: None,
+        }
+    }
+
+    #[test]
+    fn fingerprint_same_input_stable() {
+        let cfg = make_cfg();
+        let articles = vec![make_article("https://example.com/a"), make_article("https://example.com/b")];
+        let fp1 = compute_fingerprint("My Feed", &articles, &cfg);
+        let fp2 = compute_fingerprint("My Feed", &articles, &cfg);
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_different_article_order() {
+        let cfg = make_cfg();
+        let a = make_article("https://example.com/a");
+        let b = make_article("https://example.com/b");
+        let fp1 = compute_fingerprint("My Feed", &[a.clone(), b.clone()], &cfg);
+        let fp2 = compute_fingerprint("My Feed", &[b, a], &cfg);
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_adding_article_changes() {
+        let cfg = make_cfg();
+        let articles1 = vec![make_article("https://example.com/a")];
+        let articles2 = vec![
+            make_article("https://example.com/a"),
+            make_article("https://example.com/b"),
+        ];
+        let fp1 = compute_fingerprint("My Feed", &articles1, &cfg);
+        let fp2 = compute_fingerprint("My Feed", &articles2, &cfg);
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_kobo_toggle_changes() {
+        let mut cfg1 = make_cfg();
+        cfg1.kobo = true;
+        let mut cfg2 = make_cfg();
+        cfg2.kobo = false;
+        let articles = vec![make_article("https://example.com/a")];
+        let fp1 = compute_fingerprint("My Feed", &articles, &cfg1);
+        let fp2 = compute_fingerprint("My Feed", &articles, &cfg2);
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_feed_date_ignored() {
+        // feed_date is intentionally excluded — feeds like The Guardian update it on
+        // every request even when no articles change, which would defeat skip detection.
+        let cfg = make_cfg();
+        let articles = vec![make_article("https://example.com/a")];
+        let fp1 = compute_fingerprint("My Feed", &articles, &cfg);
+        let fp2 = compute_fingerprint("My Feed", &articles, &cfg);
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_content_selectors_change() {
+        let articles = vec![make_article("https://example.com/a")];
+        let mut cfg1 = make_cfg();
+        cfg1.content_selectors = None;
+        let mut cfg2 = make_cfg();
+        cfg2.content_selectors = Some(vec!["article".to_string()]);
+        let fp1 = compute_fingerprint("My Feed", &articles, &cfg1);
+        let fp2 = compute_fingerprint("My Feed", &articles, &cfg2);
+        assert_ne!(fp1, fp2);
+    }
 }

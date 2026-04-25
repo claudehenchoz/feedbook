@@ -46,6 +46,12 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
             height     INTEGER NOT NULL DEFAULT 0,
             data       BLOB    NOT NULL,
             created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS epub_fingerprints (
+            feed_url    TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL,
+            output_path TEXT NOT NULL,
+            built_at    INTEGER NOT NULL
         );",
     )?;
     // Migrations for existing installs — succeed on upgrade, ignored on fresh create
@@ -204,6 +210,26 @@ pub fn load_images(conn: &Connection, sha1s: &[String]) -> Result<Vec<ProcessedI
     Ok(images)
 }
 
+pub fn get_fingerprint(conn: &Connection, feed_url: &str) -> Result<Option<(String, String)>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT fingerprint, output_path FROM epub_fingerprints WHERE feed_url = ?1",
+    )?;
+    let mut rows = stmt.query(params![feed_url])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some((row.get(0)?, row.get(1)?)));
+    }
+    Ok(None)
+}
+
+pub fn store_fingerprint(conn: &Connection, feed_url: &str, fingerprint: &str, output_path: &str) -> Result<(), AppError> {
+    let built_at = Utc::now().timestamp();
+    conn.execute(
+        "INSERT OR REPLACE INTO epub_fingerprints (feed_url, fingerprint, output_path, built_at) VALUES (?1, ?2, ?3, ?4)",
+        params![feed_url, fingerprint, output_path, built_at],
+    )?;
+    Ok(())
+}
+
 pub fn get_cached_cover(conn: &Connection, key: &str) -> Result<Option<CachedTemplate>, AppError> {
     let mut stmt = conn.prepare("SELECT width, height, data FROM covers WHERE cache_key = ?1")?;
     let mut rows = stmt.query(params![key])?;
@@ -257,7 +283,7 @@ mod tests {
     #[test]
     fn open_db_creates_tables() {
         let conn = mem_db();
-        // Verify all three tables exist by counting rows (would fail if tables are missing)
+        // Verify all tables exist by counting rows (would fail if tables are missing)
         let articles: i64 = conn
             .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
             .unwrap();
@@ -267,9 +293,13 @@ mod tests {
         let covers: i64 = conn
             .query_row("SELECT COUNT(*) FROM covers", [], |r| r.get(0))
             .unwrap();
+        let fingerprints: i64 = conn
+            .query_row("SELECT COUNT(*) FROM epub_fingerprints", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(articles, 0);
         assert_eq!(images, 0);
         assert_eq!(covers, 0);
+        assert_eq!(fingerprints, 0);
     }
 
     #[test]
@@ -438,6 +468,31 @@ mod tests {
         let conn = mem_db();
         let result = get_cached_cover(&conn, "nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn store_and_get_fingerprint() {
+        let conn = mem_db();
+        store_fingerprint(&conn, "https://feed.example/", "abc123", "/out/feed.kepub.epub").unwrap();
+        let result = get_fingerprint(&conn, "https://feed.example/").unwrap().unwrap();
+        assert_eq!(result.0, "abc123");
+        assert_eq!(result.1, "/out/feed.kepub.epub");
+    }
+
+    #[test]
+    fn get_fingerprint_missing_returns_none() {
+        let conn = mem_db();
+        let result = get_fingerprint(&conn, "https://nonexistent.example/").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn store_fingerprint_overwrites() {
+        let conn = mem_db();
+        store_fingerprint(&conn, "https://feed.example/", "abc123", "/out/feed.kepub.epub").unwrap();
+        store_fingerprint(&conn, "https://feed.example/", "def456", "/out/feed.kepub.epub").unwrap();
+        let result = get_fingerprint(&conn, "https://feed.example/").unwrap().unwrap();
+        assert_eq!(result.0, "def456");
     }
 
     #[test]
