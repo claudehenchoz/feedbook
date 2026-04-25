@@ -11,21 +11,6 @@ const COLS: u32 = 9;
 const ROWS: u32 = 11;
 const ROTATION_DEGREES: f32 = 5.0;
 
-/// Extracts the second-level domain from a URL as a short display title.
-/// "https://www.inoreader.com/..." → "inoreader"
-pub fn extract_domain_title(feed_url: &str) -> String {
-    let host = match url::Url::parse(feed_url).ok().and_then(|u| u.host_str().map(str::to_owned)) {
-        Some(h) => h,
-        None => return "feed".to_string(),
-    };
-    let parts: Vec<&str> = host.split('.').collect();
-    if parts.len() >= 2 {
-        parts[parts.len() - 2].to_string()
-    } else {
-        host
-    }
-}
-
 /// Discovers favicon candidates by scraping `<link rel="icon">` tags from the
 /// site's homepage, falling back to `/favicon.ico`. Tries candidates largest-
 /// first and returns the first one whose bytes decode as a raster image
@@ -156,6 +141,7 @@ async fn try_favicon_from_base(client: &reqwest::Client, base: &url::Url) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::extract_domain_title;
 
     // ── extract_domain_title ──────────────────────────────────────────────────
 

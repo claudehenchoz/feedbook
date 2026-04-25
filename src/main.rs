@@ -10,6 +10,7 @@ mod log;
 mod sanitize;
 mod scraper;
 mod throttle;
+mod util;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -64,11 +65,16 @@ fn compute_fingerprint(
     hex::encode(h.finalize())
 }
 
+enum FeedOutcome {
+    Updated { new_articles: usize },
+    Skipped,
+}
+
 async fn run_feed(
     cfg: &ResolvedFeedConfig,
     client: &reqwest::Client,
     log_file: Option<log::LogFile>,
-) -> Result<(), AppError> {
+) -> Result<FeedOutcome, AppError> {
     let db_path = resolve_db_path(cfg)?;
     let mut conn = cache::open_db(&db_path)?;
     let t_start = std::time::Instant::now();
@@ -142,7 +148,7 @@ async fn run_feed(
     // ── Cover template cache check ────────────────────────────────────────────
 
     // Use cfg.name as the cover title if provided, otherwise derive from URL
-    let domain_title = cfg.name.clone().unwrap_or_else(|| cover::extract_domain_title(&cfg.url));
+    let domain_title = cfg.name.clone().unwrap_or_else(|| util::extract_domain_title(&cfg.url));
 
     // Key covers by feed URL + name only (no date) so the expensive template is
     // reused across runs; only the date/time overlay is re-applied each time.
@@ -284,7 +290,7 @@ async fn run_feed(
 
     if all_articles.is_empty() {
         run_log.println("No articles found.");
-        return Ok(());
+        return Ok(FeedOutcome::Skipped);
     }
 
     // ── Compute output path (needed before skip check for the log message) ────
@@ -304,7 +310,7 @@ async fn run_feed(
         if let Some((prev_fp, prev_path)) = cache::get_fingerprint(&conn, &cfg.url)? {
             if prev_fp == fingerprint && Path::new(&prev_path).exists() {
                 run_log.println(&format!("Unchanged, skipping rebuild: {}", prev_path));
-                return Ok(());
+                return Ok(FeedOutcome::Skipped);
             }
         }
     }
@@ -374,7 +380,7 @@ async fn run_feed(
                         let saved = t.clone();
                         (t, Some(saved))
                     }
-                    None => return Ok(()),
+                    None => return Ok(FeedOutcome::Skipped),
                 }
             };
 
@@ -424,7 +430,42 @@ async fn run_feed(
 
     cache::store_fingerprint(&conn, &cfg.url, &fingerprint, &output_display)?;
 
-    Ok(())
+    Ok(FeedOutcome::Updated { new_articles: pipeline_result.len() })
+}
+
+fn print_run_report(outcomes: &[(String, Result<FeedOutcome, ()>)]) {
+    let mut updated: Vec<(&str, usize)> = vec![];
+    let mut skipped: Vec<&str>          = vec![];
+    let mut errors:  Vec<&str>          = vec![];
+
+    for (name, outcome) in outcomes {
+        match outcome {
+            Ok(FeedOutcome::Updated { new_articles }) => updated.push((name, *new_articles)),
+            Ok(FeedOutcome::Skipped)                  => skipped.push(name),
+            Err(_)                                    => errors.push(name),
+        }
+    }
+
+    let mut parts: Vec<String> = vec![];
+
+    if !updated.is_empty() {
+        let n = updated.len();
+        let detail: Vec<String> = updated.iter()
+            .map(|(n, c)| format!("{} {} new", n, c))
+            .collect();
+        parts.push(format!("{} feed{} updated ({})", n, if n == 1 { "" } else { "s" }, detail.join(", ")));
+    }
+    if !skipped.is_empty() {
+        let n = skipped.len();
+        parts.push(format!("{} feed{} skipped ({})", n, if n == 1 { "" } else { "s" }, skipped.join(", ")));
+    }
+    if !errors.is_empty() {
+        let n = errors.len();
+        parts.push(format!("{} feed{} error ({})", n, if n == 1 { "" } else { "s" }, errors.join(", ")));
+    }
+
+    println!();
+    println!("{}", if parts.is_empty() { "Nothing to do.".to_string() } else { parts.join(" · ") });
 }
 
 #[tokio::main]
@@ -498,20 +539,28 @@ async fn main() -> Result<(), AppError> {
 
     cache::prune_images(&cache::open_db(&db_path)?)?;
 
-    futures::stream::iter(feeds_to_run)
+    let outcomes: Vec<(String, Result<FeedOutcome, ()>)> = futures::stream::iter(feeds_to_run)
         .map(|cfg| {
             let client = client.clone();
             let log_file = log_file.clone();
             async move {
-                let url = cfg.url.clone();
-                if let Err(e) = run_feed(&cfg, &client, log_file).await {
-                    eprintln!("{}: Error: {e}", feed_log_prefix(&url));
-                }
+                let name = cfg.name.clone()
+                    .unwrap_or_else(|| util::extract_domain_title(&cfg.url));
+                let outcome = match run_feed(&cfg, &client, log_file).await {
+                    Ok(o) => Ok(o),
+                    Err(e) => {
+                        eprintln!("{}: Error: {e}", feed_log_prefix(&cfg.url));
+                        Err(())
+                    }
+                };
+                (name, outcome)
             }
         })
         .buffer_unordered(5)
-        .collect::<Vec<()>>()
+        .collect::<Vec<_>>()
         .await;
+
+    print_run_report(&outcomes);
 
     Ok(())
 }
