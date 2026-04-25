@@ -80,15 +80,43 @@ async fn run_feed(
 
     let report_times = cfg.report_times;
 
-    let t = std::time::Instant::now();
-    let feed_data = feed::fetch_feed(client, &cfg.url).await?;
-    if report_times { run_log.println(&format!("[TIMING] feed fetch: {:?}", t.elapsed())); }
-    // Apply name override: cfg.name replaces feed's self-reported title
-    let feed_title = cfg.name.clone().unwrap_or(feed_data.title);
-    let feed_date  = feed_data.date;
-    run_log.println(&format!("Feed: {}", feed_title));
+    let cached_headers = cache::get_feed_headers(&conn, &cfg.url)?;
+    let cached_etag = cached_headers.as_ref().and_then(|h| h.etag.as_deref());
+    let cached_lm   = cached_headers.as_ref().and_then(|h| h.last_modified.as_deref());
 
-    let mut feed_items = feed_data.items;
+    let t = std::time::Instant::now();
+    let feed::FetchOutcome { feed: feed_result, etag: new_etag, last_modified: new_lm } =
+        feed::fetch_feed(client, &cfg.url, cached_etag, cached_lm).await?;
+    let not_modified = feed_result.is_none();
+    if report_times {
+        let suffix = if not_modified { " (304 Not Modified)" } else { "" };
+        run_log.println(&format!("[TIMING] feed fetch: {:?}{}", t.elapsed(), suffix));
+    }
+
+    let (feed_title, feed_date, mut feed_items) = match feed_result {
+        Some(data) => {
+            let title = cfg.name.clone().unwrap_or_else(|| data.title.clone());
+            cache::store_feed_headers(&conn, &cfg.url, &cache::FeedHeaders {
+                etag:          new_etag.or_else(|| cached_etag.map(str::to_owned)),
+                last_modified: new_lm.or_else(|| cached_lm.map(str::to_owned)),
+                feed_title:    Some(data.title.clone()),
+                feed_date:     data.date.map(|d| d.to_rfc3339()),
+            })?;
+            (title, data.date, data.items)
+        }
+        None => {
+            let title = cfg.name.clone()
+                .or_else(|| cached_headers.as_ref().and_then(|h| h.feed_title.clone()))
+                .unwrap_or_else(|| "Feed".to_string());
+            let date = cached_headers.as_ref()
+                .and_then(|h| h.feed_date.as_deref())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            (title, date, vec![])
+        }
+    };
+    run_log.println(&format!("Feed: {}{}", feed_title, if not_modified { " (unchanged)" } else { "" }));
+
     if let Some(n) = cfg.limit {
         feed_items.truncate(n);
     }

@@ -14,13 +14,47 @@ pub struct FeedData {
     pub items: Vec<FeedItem>,
 }
 
+pub struct FetchOutcome {
+    pub feed:          Option<FeedData>,
+    pub etag:          Option<String>,
+    pub last_modified: Option<String>,
+}
+
 pub async fn fetch_feed(
     client: &reqwest::Client,
     url: &str,
-) -> Result<FeedData, AppError> {
-    let bytes = client.get(url).send().await?.bytes().await?;
-    let feed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|e| AppError::Feed(e.to_string()))?;
+    cached_etag: Option<&str>,
+    cached_last_modified: Option<&str>,
+) -> Result<FetchOutcome, AppError> {
+    let mut req = client.get(url);
+    if let Some(etag) = cached_etag {
+        req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    if let Some(lm) = cached_last_modified {
+        req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
+    }
+    let response = req.send().await?;
+
+    let etag = response.headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let last_modified = response.headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(FetchOutcome { feed: None, etag, last_modified });
+    }
+
+    let bytes = response.bytes().await?;
+    let feed = tokio::task::spawn_blocking(move || {
+        feed_rs::parser::parse(bytes.as_ref())
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("Parse task panicked: {e}")))?
+    .map_err(|e| AppError::Feed(e.to_string()))?;
 
     let feed_title = feed
         .title
@@ -45,7 +79,11 @@ pub async fn fetch_feed(
     let feed_date = feed.published.or(feed.updated)
         .or_else(|| items.iter().filter_map(|i| i.date).max());
 
-    Ok(FeedData { title: feed_title, date: feed_date, items })
+    Ok(FetchOutcome {
+        feed: Some(FeedData { title: feed_title, date: feed_date, items }),
+        etag,
+        last_modified,
+    })
 }
 
 #[cfg(test)]
@@ -97,9 +135,9 @@ mod tests {
                 .body(RSS_FEED);
         });
         let client = test_client();
-        let result = fetch_feed(&client, &server.url("/feed.xml")).await;
-        assert!(result.is_ok(), "fetch_feed failed");
-        let data = result.unwrap();
+        let outcome = fetch_feed(&client, &server.url("/feed.xml"), None, None).await;
+        assert!(outcome.is_ok(), "fetch_feed failed");
+        let data = outcome.unwrap().feed.unwrap();
         assert_eq!(data.title, "Test RSS Feed");
         assert_eq!(data.items.len(), 2);
         assert_eq!(data.items[0].url, "https://example.com/article-1");
@@ -119,7 +157,7 @@ mod tests {
                 .body(ATOM_FEED);
         });
         let client = test_client();
-        let data = fetch_feed(&client, &server.url("/atom.xml")).await.unwrap();
+        let data = fetch_feed(&client, &server.url("/atom.xml"), None, None).await.unwrap().feed.unwrap();
         assert_eq!(data.title, "Test Atom Feed");
         assert_eq!(data.items.len(), 1);
         assert_eq!(data.items[0].url, "https://example.com/atom-article");
@@ -136,7 +174,7 @@ mod tests {
             then.status(200).body(empty_feed);
         });
         let client = test_client();
-        let data = fetch_feed(&client, &server.url("/empty.xml")).await.unwrap();
+        let data = fetch_feed(&client, &server.url("/empty.xml"), None, None).await.unwrap().feed.unwrap();
         assert!(data.items.is_empty());
     }
 
@@ -150,7 +188,7 @@ mod tests {
             then.status(200).body(no_title_feed);
         });
         let client = test_client();
-        let data = fetch_feed(&client, &server.url("/notitle.xml")).await.unwrap();
+        let data = fetch_feed(&client, &server.url("/notitle.xml"), None, None).await.unwrap().feed.unwrap();
         assert_eq!(data.title, "Feed");
     }
 
@@ -162,7 +200,42 @@ mod tests {
             then.status(500);
         });
         let client = test_client();
-        let result = fetch_feed(&client, &server.url("/error.xml")).await;
+        let result = fetch_feed(&client, &server.url("/error.xml"), None, None).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_feed_304_returns_not_modified() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/feed.xml")
+                .header("If-None-Match", "\"abc123\"");
+            then.status(304)
+                .header("ETag", "\"abc123\"");
+        });
+        let client = test_client();
+        let outcome = fetch_feed(&client, &server.url("/feed.xml"), Some("\"abc123\""), None)
+            .await
+            .unwrap();
+        assert!(outcome.feed.is_none());
+        assert_eq!(outcome.etag.as_deref(), Some("\"abc123\""));
+    }
+
+    #[tokio::test]
+    async fn fetch_feed_etag_captured_from_200() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/feed.xml");
+            then.status(200)
+                .header("ETag", "\"v1\"")
+                .header("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT")
+                .header("content-type", "application/rss+xml")
+                .body(RSS_FEED);
+        });
+        let client = test_client();
+        let outcome = fetch_feed(&client, &server.url("/feed.xml"), None, None).await.unwrap();
+        assert!(outcome.feed.is_some());
+        assert_eq!(outcome.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(outcome.last_modified.as_deref(), Some("Mon, 01 Jan 2024 00:00:00 GMT"));
     }
 }

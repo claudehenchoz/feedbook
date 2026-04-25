@@ -52,6 +52,13 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
             fingerprint TEXT NOT NULL,
             output_path TEXT NOT NULL,
             built_at    INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS feed_headers (
+            feed_url      TEXT PRIMARY KEY,
+            etag          TEXT,
+            last_modified TEXT,
+            feed_title    TEXT,
+            feed_date     TEXT
         );",
     )?;
     // Migrations for existing installs — succeed on upgrade, ignored on fresh create
@@ -247,6 +254,38 @@ pub fn store_cover(conn: &Connection, key: &str, width: u32, height: u32, data: 
     conn.execute(
         "INSERT OR REPLACE INTO covers (cache_key, width, height, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![key, width, height, data, created_at],
+    )?;
+    Ok(())
+}
+
+pub struct FeedHeaders {
+    pub etag:          Option<String>,
+    pub last_modified: Option<String>,
+    pub feed_title:    Option<String>,
+    pub feed_date:     Option<String>,
+}
+
+pub fn get_feed_headers(conn: &Connection, feed_url: &str) -> Result<Option<FeedHeaders>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT etag, last_modified, feed_title, feed_date FROM feed_headers WHERE feed_url = ?1",
+    )?;
+    let mut rows = stmt.query(params![feed_url])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some(FeedHeaders {
+            etag:          row.get(0)?,
+            last_modified: row.get(1)?,
+            feed_title:    row.get(2)?,
+            feed_date:     row.get(3)?,
+        }));
+    }
+    Ok(None)
+}
+
+pub fn store_feed_headers(conn: &Connection, feed_url: &str, h: &FeedHeaders) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO feed_headers (feed_url, etag, last_modified, feed_title, feed_date)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![feed_url, h.etag, h.last_modified, h.feed_title, h.feed_date],
     )?;
     Ok(())
 }
@@ -500,5 +539,57 @@ mod tests {
         let conn = mem_db();
         let result = load_images(&conn, &[]).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn store_and_get_feed_headers() {
+        let conn = mem_db();
+        let h = FeedHeaders {
+            etag:          Some("\"abc123\"".to_string()),
+            last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string()),
+            feed_title:    Some("My Feed".to_string()),
+            feed_date:     Some("2024-01-01T00:00:00Z".to_string()),
+        };
+        store_feed_headers(&conn, "https://example.com/feed", &h).unwrap();
+        let result = get_feed_headers(&conn, "https://example.com/feed").unwrap().unwrap();
+        assert_eq!(result.etag.as_deref(), Some("\"abc123\""));
+        assert_eq!(result.last_modified.as_deref(), Some("Mon, 01 Jan 2024 00:00:00 GMT"));
+        assert_eq!(result.feed_title.as_deref(), Some("My Feed"));
+        assert_eq!(result.feed_date.as_deref(), Some("2024-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn get_feed_headers_missing_returns_none() {
+        let conn = mem_db();
+        let result = get_feed_headers(&conn, "https://nonexistent.example/").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn store_feed_headers_overwrites() {
+        let conn = mem_db();
+        let feed = "https://example.com/feed";
+        store_feed_headers(&conn, feed, &FeedHeaders {
+            etag: Some("\"v1\"".to_string()), last_modified: None,
+            feed_title: Some("Old Title".to_string()), feed_date: None,
+        }).unwrap();
+        store_feed_headers(&conn, feed, &FeedHeaders {
+            etag: Some("\"v2\"".to_string()), last_modified: None,
+            feed_title: Some("New Title".to_string()), feed_date: None,
+        }).unwrap();
+        let result = get_feed_headers(&conn, feed).unwrap().unwrap();
+        assert_eq!(result.etag.as_deref(), Some("\"v2\""));
+        assert_eq!(result.feed_title.as_deref(), Some("New Title"));
+    }
+
+    #[test]
+    fn store_feed_headers_nullable_fields() {
+        let conn = mem_db();
+        store_feed_headers(&conn, "https://example.com/feed", &FeedHeaders {
+            etag: None, last_modified: None, feed_title: None, feed_date: None,
+        }).unwrap();
+        let result = get_feed_headers(&conn, "https://example.com/feed").unwrap().unwrap();
+        assert!(result.etag.is_none());
+        assert!(result.last_modified.is_none());
     }
 }
