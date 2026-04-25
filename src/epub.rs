@@ -379,6 +379,7 @@ pub fn build_epub(
     builder
         .chapter(all_chapters)
         .write()
+        .compression(1)
         .save(output_path)
         .map_err(|e| AppError::Epub(e.to_string()))?;
 
