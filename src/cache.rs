@@ -30,7 +30,7 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
             html        TEXT,
             fetched_at  INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_feed_url   ON articles(feed_url);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_article ON articles(feed_url, article_url);
         CREATE INDEX IF NOT EXISTS idx_fetched_at ON articles(fetched_at);
         CREATE TABLE IF NOT EXISTS images (
             url_sha1   TEXT    PRIMARY KEY,
