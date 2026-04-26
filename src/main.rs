@@ -350,58 +350,48 @@ async fn run_feed(
             None
         };
 
-    let (cover_png, cover_new_template) = {
-        // ── 1. Get or build the static template ──────────────────────────────
-        let (template, new_template): (cover::CoverTemplate, Option<cover::CoverTemplate>) =
-            if let Some(cached) = cover_template_cache {
-                run_log.println("Cover template cached");
-                if report_times { run_log.println("[TIMING] cover template: cached (skipped generation)"); }
-                (cover::CoverTemplate { width: cached.width, height: cached.height, rgba: cached.data }, None)
-            } else {
-                let t_favicon = std::time::Instant::now();
-                let favicon = if let Some(h) = favicon_handle { h.await.ok().flatten() } else { None };
-                if report_times { run_log.println(&format!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed())); }
+    // ── 1. Get or build the static template ──────────────────────────────────
+    let template: cover::CoverTemplate = if let Some(cached) = cover_template_cache {
+        run_log.println("Cover template cached");
+        if report_times { run_log.println("[TIMING] cover template: cached (skipped generation)"); }
+        cover::CoverTemplate { width: cached.width, height: cached.height, rgba: cached.data }
+    } else {
+        let t_favicon = std::time::Instant::now();
+        let favicon = if let Some(h) = favicon_handle { h.await.ok().flatten() } else { None };
+        if report_times { run_log.println(&format!("[TIMING] favicon fetch: {:?}", t_favicon.elapsed())); }
 
-                run_log.println("Generating cover template...");
+        run_log.println("Generating cover template...");
 
-                let title_owned = domain_title;
-                let t_cover = std::time::Instant::now();
-                let tmpl = tokio::task::spawn_blocking(move || {
-                    cover::generate_cover_template(&title_owned, favicon.as_deref())
-                })
-                .await
-                .ok()
-                .and_then(|r| r.ok());
-                if report_times { run_log.println(&format!("[TIMING] cover template generate: {:?}", t_cover.elapsed())); }
-
-                match tmpl {
-                    Some(t) => {
-                        // ~8 MB memcpy — much cheaper than the PNG decode it replaces
-                        let saved = t.clone();
-                        (t, Some(saved))
-                    }
-                    None => return Ok(FeedOutcome::Skipped),
-                }
-            };
-
-        // ── 2. Apply date/time overlay ────────────────────────────────────────
-        let t_apply = std::time::Instant::now();
-        let cover = tokio::task::spawn_blocking(move || {
-            cover::apply_date_to_cover(&template, feed_date)
+        let title_owned = domain_title;
+        let t_cover = std::time::Instant::now();
+        let tmpl = tokio::task::spawn_blocking(move || {
+            cover::generate_cover_template(&title_owned, favicon.as_deref())
         })
         .await
         .ok()
         .and_then(|r| r.ok());
-        if report_times { run_log.println(&format!("[TIMING] cover date apply: {:?}", t_apply.elapsed())); }
+        if report_times { run_log.println(&format!("[TIMING] cover template generate: {:?}", t_cover.elapsed())); }
 
-        run_log.println("Cover ready");
-
-        (cover, new_template)
+        match tmpl {
+            Some(t) => {
+                let _ = cache::store_cover(&conn, &template_key, t.width, t.height, &t.rgba);
+                t
+            }
+            None => return Ok(FeedOutcome::Skipped),
+        }
     };
 
-    if let Some(template) = cover_new_template {
-        let _ = cache::store_cover(&conn, &template_key, template.width, template.height, &template.rgba);
-    }
+    // ── 2. Apply date/time overlay ────────────────────────────────────────────
+    let t_apply = std::time::Instant::now();
+    let cover_png = tokio::task::spawn_blocking(move || {
+        cover::apply_date_to_cover(template, feed_date)
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    if report_times { run_log.println(&format!("[TIMING] cover date apply: {:?}", t_apply.elapsed())); }
+
+    run_log.println("Cover ready");
 
     // ── Build EPUB / KEPUB ────────────────────────────────────────────────────
 

@@ -443,7 +443,30 @@ fn process_image_bytes(
         });
     }
 
-    // Decode raster image
+    // Fast path: read just the header to learn format + dimensions.
+    // For JPEG/PNG already within max_width, ship the original bytes verbatim
+    // — no decode, no resize, no re-encode.
+    if let Ok(reader) = image::ImageReader::new(Cursor::new(&bytes)).with_guessed_format() {
+        let ext_opt = match reader.format() {
+            Some(image::ImageFormat::Jpeg) => Some("jpeg"),
+            Some(image::ImageFormat::Png)  => Some("png"),
+            _ => None,
+        };
+        if let Some(ext) = ext_opt {
+            if let Ok((w, _h)) = reader.into_dimensions() {
+                if w <= max_width {
+                    return Some(ProcessedImage {
+                        url_sha1:     sha1.to_string(),
+                        original_url: abs_url.to_string(),
+                        filename:     format!("images/{}.{}", sha1, ext),
+                        data:         bytes,
+                    });
+                }
+            }
+        }
+    }
+
+    // Slow path: full decode (the image is too wide, or it's webp/gif/ico/etc.)
     let img = match image::load_from_memory(&bytes) {
         Ok(img) => img,
         Err(e) => {
@@ -452,34 +475,13 @@ fn process_image_bytes(
         }
     };
 
-    // Determine output format based on alpha channel presence
     let has_alpha = img.color().has_alpha();
 
-    // Convert to canonical 8-bit format for resize
     let img: DynamicImage = if has_alpha {
         img.into_rgba8().into()
     } else {
         img.into_rgb8().into()
     };
-
-    // If already within max_width and a passthrough-safe format, skip re-encoding
-    if img.width() <= max_width {
-        if let Ok(fmt) = image::guess_format(&bytes) {
-            let ext = match fmt {
-                ImageFormat::Jpeg => Some("jpeg"),
-                ImageFormat::Png  => Some("png"),
-                _ => None,
-            };
-            if let Some(ext) = ext {
-                return Some(ProcessedImage {
-                    url_sha1:     sha1.to_string(),
-                    original_url: abs_url.to_string(),
-                    filename:     format!("images/{}.{}", sha1, ext),
-                    data:         bytes,
-                });
-            }
-        }
-    }
 
     // Resize if wider than max_width
     let img = if img.width() > max_width {

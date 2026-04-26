@@ -64,6 +64,8 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
     // Migrations for existing installs — succeed on upgrade, ignored on fresh create
     let _ = conn.execute_batch("ALTER TABLE covers ADD COLUMN width  INTEGER NOT NULL DEFAULT 0");
     let _ = conn.execute_batch("ALTER TABLE covers ADD COLUMN height INTEGER NOT NULL DEFAULT 0");
+    // Drop old-size cover templates after dimension changes (1264×1680 → 632×840)
+    let _ = conn.execute_batch("DELETE FROM covers WHERE width != 632 OR height != 840");
     Ok(conn)
 }
 

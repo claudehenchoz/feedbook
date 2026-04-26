@@ -5,8 +5,8 @@ use crate::error::AppError;
 
 static FONT_BYTES: &[u8] = include_bytes!("../assets/texgyreheros-bold.otf");
 
-const W: u32 = 1264;
-const H: u32 = 1680;
+const W: u32 = 632;
+const H: u32 = 840;
 const COLS: u32 = 9;
 const ROWS: u32 = 11;
 const ROTATION_DEGREES: f32 = 5.0;
@@ -225,7 +225,7 @@ mod tests {
         let date = chrono::DateTime::parse_from_rfc3339("2024-06-15T08:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let result = apply_date_to_cover(&template, Some(date));
+        let result = apply_date_to_cover(template, Some(date));
         assert!(result.is_ok());
         let bytes = result.unwrap();
         assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn apply_date_to_cover_no_date_roundtrips() {
         let template = generate_cover_template("Test Feed", None).unwrap();
-        let result = apply_date_to_cover(&template, None);
+        let result = apply_date_to_cover(template, None);
         assert!(result.is_ok());
     }
 }
@@ -305,18 +305,18 @@ pub fn generate_cover_template(
     let font = FontRef::try_from_slice(FONT_BYTES)
         .map_err(|e| AppError::Other(format!("Font load error: {e}")))?;
 
-    let margin_x      = 80.0f32;
-    let margin_bottom = 80.0f32;
+    let margin_x      = 40.0f32;
+    let margin_bottom = 40.0f32;
 
-    // Title must end before x=800 so the top-right date zone stays permanently blank.
-    let target_width = 800.0 - margin_x; // = 720 px
+    // Title must end before x=400 so the top-right date zone stays permanently blank.
+    let target_width = 400.0 - margin_x;
 
-    let initial_scale   = PxScale::from(140.0);
+    let initial_scale   = PxScale::from(70.0);
     let standard_ascent = font.as_scaled(initial_scale).ascent();
-    let title_v_center_y = 80.0 + (standard_ascent / 2.0);
+    let title_v_center_y = 40.0 + (standard_ascent / 2.0);
 
-    let mut font_size: f32 = 140.0;
-    while font_size > 40.0 {
+    let mut font_size: f32 = 70.0;
+    while font_size > 20.0 {
         if measure_text_width(title, PxScale::from(font_size), &font) <= target_width {
             break;
         }
@@ -334,7 +334,7 @@ pub fn generate_cover_template(
     let cell_size       = (available_w / COLS as f32) as u32;
     let grid_total_h    = (cell_size * ROWS) as f32;
     let title_bottom_y  = title_baseline + title_descent_abs;
-    let min_start_y     = title_bottom_y + 60.0;
+    let min_start_y     = title_bottom_y + 30.0;
     let pattern_start_y = (H as f32 - margin_bottom - grid_total_h).max(min_start_y) as u32;
 
     if cell_size > 0 {
@@ -352,19 +352,42 @@ pub fn generate_cover_template(
 /// Overlays the current date/time on a raw-RGBA cover template.
 /// This is the fast per-run step — no favicon fetch, no grid rendering, no PNG decode.
 pub fn apply_date_to_cover(
-    template: &CoverTemplate,
+    mut template: CoverTemplate,
     date: Option<DateTime<Utc>>,
 ) -> Result<Vec<u8>, AppError> {
-    let mut img = RgbaImage::from_raw(template.width, template.height, template.rgba.clone())
-        .ok_or_else(|| AppError::Other("cover template: invalid dimensions".to_string()))?;
-
     if let Some(d) = date {
         let font = FontRef::try_from_slice(FONT_BYTES)
             .map_err(|e| AppError::Other(format!("Font load error: {e}")))?;
 
-        let margin_x         = 80.0f32;
-        let date_scale       = PxScale::from(30.0);
-        let date_line_height = 36.0f32;
+        let margin_x         = 40.0f32;
+        let date_scale       = PxScale::from(15.0);
+        let date_line_height = 18.0f32;
+        let date_baseline_y0 = 40.0f32;
+
+        // Region big enough to hold 3 right-aligned lines + slack for descenders.
+        let region_w: u32 = (W / 3).max(160);
+        let region_h: u32 = (H / 10).max(60);
+        let region_x: u32 = W.saturating_sub(margin_x as u32 + region_w);
+        let region_y: u32 = (margin_x as u32) / 2;
+
+        let stride        = (template.width * 4) as usize;
+        let region_stride = (region_w * 4) as usize;
+        let copy_w        = region_w.min(template.width.saturating_sub(region_x));
+        let copy_bytes    = (copy_w * 4) as usize;
+
+        // Copy the template's region into a small RGBA buffer (scanline at a time).
+        let mut region_buf = vec![0u8; (region_w * region_h * 4) as usize];
+        for ry in 0..region_h {
+            let src_y = region_y + ry;
+            if src_y >= template.height { break; }
+            let src_off = src_y as usize * stride + (region_x * 4) as usize;
+            let dst_off = ry as usize * region_stride;
+            region_buf[dst_off..dst_off + copy_bytes]
+                .copy_from_slice(&template.rgba[src_off..src_off + copy_bytes]);
+        }
+
+        let mut region = RgbaImage::from_raw(region_w, region_h, region_buf)
+            .ok_or_else(|| AppError::Other("date region: invalid dims".to_string()))?;
 
         let weekday        = d.format("%A").to_string().to_lowercase();
         let day_month_year = format!("{} {} {}",
@@ -375,26 +398,38 @@ pub fn apply_date_to_cover(
         let date_ascent = font.as_scaled(date_scale).ascent();
         for (i, line) in date_strings.iter().enumerate() {
             let line_w = measure_text_width(line, date_scale, &font);
-            let x = W as f32 - margin_x - line_w;
-            let y = 80.0 + date_ascent + i as f32 * date_line_height;
-            draw_text(&mut img, line, x, y, date_scale, Rgba([0, 0, 0, 255]), &font);
+            // Compute in canvas coords, then translate into region coords.
+            let canvas_x = W as f32 - margin_x - line_w;
+            let canvas_y = date_baseline_y0 + date_ascent + i as f32 * date_line_height;
+            let local_x  = canvas_x - region_x as f32;
+            let local_y  = canvas_y - region_y as f32;
+            draw_text(&mut region, line, local_x, local_y, date_scale, Rgba([0, 0, 0, 255]), &font);
+        }
+
+        // Copy the modified region back into the template's bytes.
+        let region_raw = region.into_raw();
+        for ry in 0..region_h {
+            let dst_y = region_y + ry;
+            if dst_y >= template.height { break; }
+            let dst_off = dst_y as usize * stride + (region_x * 4) as usize;
+            let src_off = ry as usize * region_stride;
+            template.rgba[dst_off..dst_off + copy_bytes]
+                .copy_from_slice(&region_raw[src_off..src_off + copy_bytes]);
         }
     }
 
-    encode_png_fast(&img)
+    encode_rgba_png(template.width, template.height, &template.rgba)
 }
 
-
-// Simplified PNG encoding using the `png` crate, which is faster than `image`'s encoder.
-fn encode_png_fast(img: &RgbaImage) -> Result<Vec<u8>, AppError> {
+fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, AppError> {
     let mut buf = Vec::new();
-    let mut encoder = png::Encoder::new(&mut buf, img.width(), img.height());
+    let mut encoder = png::Encoder::new(&mut buf, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Fast);
     let mut writer = encoder.write_header()
         .map_err(|e| AppError::Other(format!("png header: {e}")))?;
-    writer.write_image_data(img.as_raw())
+    writer.write_image_data(rgba)
         .map_err(|e| AppError::Other(format!("png data: {e}")))?;
     drop(writer);
     Ok(buf)
@@ -551,6 +586,8 @@ fn draw_text(
     font: &FontRef<'_>,
 ) {
     let scaled = font.as_scaled(scale);
+    let img_w = img.width() as i32;
+    let img_h = img.height() as i32;
     let mut cursor_x = x;
     for c in text.chars() {
         let glyph_id = font.glyph_id(c);
@@ -561,7 +598,7 @@ fn draw_text(
             outlined.draw(|rx, ry, cov| {
                 let px = bb.min.x as i32 + rx as i32;
                 let py = bb.min.y as i32 + ry as i32;
-                if px < 0 || py < 0 || px >= W as i32 || py >= H as i32 {
+                if px < 0 || py < 0 || px >= img_w || py >= img_h {
                     return;
                 }
                 let existing = *img.get_pixel(px as u32, py as u32);
