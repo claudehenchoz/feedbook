@@ -8,7 +8,8 @@ clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 tokio = { version = "1.51", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "charset", "gzip", "brotli", "deflate"] }
+wreq = { version = "6.0.0-rc.23", features = ["charset", "gzip", "brotli", "deflate"] }
+wreq-util = "3.0.0-rc.10"
 feed-rs = "2.3"
 dom_smoothie = "0.17"
 ammonia = "4"
@@ -33,6 +34,9 @@ bytemuck = "1"
 [dev-dependencies]
 httpmock = "0.7"
 tempfile = "3"
+
+[patch.crates-io]
+boring2 = { path = "patches/boring2" }
 
 [profile.release]
 opt-level = 3

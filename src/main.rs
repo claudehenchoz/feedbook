@@ -72,7 +72,7 @@ enum FeedOutcome {
 
 async fn run_feed(
     cfg: &ResolvedFeedConfig,
-    client: &reqwest::Client,
+    client: &wreq::Client,
     log_file: Option<log::LogFile>,
 ) -> Result<FeedOutcome, AppError> {
     let db_path = resolve_db_path(cfg)?;
@@ -521,8 +521,8 @@ async fn main() -> Result<(), AppError> {
         }
     };
 
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+    let client = wreq::Client::builder()
+        .emulation(wreq_util::Emulation::Firefox139)
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(5))
         .build()?;

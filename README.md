@@ -196,6 +196,8 @@ cargo build --release
 cargo test
 ```
 
+(Building on Windows seems to need this before compiling: `$env:BINDGEN_EXTRA_CLANG_ARGS = "--target=x86_64-pc-windows-msvc -fms-compatibility -fms-extensions -fdeclspec"`)
+
 The binary lands at `target/release/feedbook`.
 
 ### Cross-compiling for Kobo / Kindle

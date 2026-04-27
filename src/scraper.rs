@@ -59,7 +59,7 @@ mod tests {
 
     #[tokio::test]
     async fn scrape_article_caches_url_on_http_error_status() {
-        // HTTP 500 is not a network error: reqwest returns Ok(resp) with status 500.
+        // HTTP 500 is not a network error: the client returns Ok(resp) with status 500.
         // scrape_article should still return Some so the URL is cached and not
         // re-fetched on every run; the article will have no html content.
         let server = MockServer::start();
@@ -67,7 +67,7 @@ mod tests {
             when.method(GET).path("/article");
             then.status(500);
         });
-        let client = reqwest::Client::new();
+        let client = wreq::Client::new();
         let sanitizer = build_sanitizer();
         let times = new_host_times();
         let item = crate::feed::FeedItem {
@@ -103,7 +103,7 @@ mod tests {
                 .header("content-type", "text/html")
                 .body(html);
         });
-        let client = reqwest::Client::new();
+        let client = wreq::Client::new();
         let sanitizer = build_sanitizer();
         let times = new_host_times();
         let item = crate::feed::FeedItem {
@@ -125,7 +125,7 @@ mod tests {
 }
 
 pub async fn scrape_article(
-    client: &reqwest::Client,
+    client: &wreq::Client,
     item: FeedItem,
     sanitizer: Arc<Builder<'static>>,
     times: &HostTimes,

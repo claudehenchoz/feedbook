@@ -212,7 +212,7 @@ pub fn sanitize_data_attrs(html: &str) -> String {
 /// Errors are routed through `log.println()`.
 /// without corrupting the cursor-tracking used for in-place updates.
 pub async fn download_image(
-    client:    &reqwest::Client,
+    client:    &wreq::Client,
     raw_src:   String,
     abs_url:   String,
     max_width: u32,
