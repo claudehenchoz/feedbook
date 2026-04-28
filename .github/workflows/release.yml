@@ -248,25 +248,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install base dependencies on Ubuntu
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake perl pkg-config libclang-dev musl-tools
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install musl tools
-        run: sudo apt-get install -y musl-tools
-
-      - name: Add musl target
-        run: rustup target add x86_64-unknown-linux-musl
-
-      - name: Run tests
-        run: cargo test
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
 
       - name: Build feedbook for Linux (musl)
-        run: cargo build --release --target x86_64-unknown-linux-musl
+        run: cross build --release --target x86_64-unknown-linux-musl
 
       - name: Assemble install kit
         run: |
