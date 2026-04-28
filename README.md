@@ -196,7 +196,12 @@ cargo build --release
 cargo test
 ```
 
-(Building on Windows seems to need this before compiling: `$env:BINDGEN_EXTRA_CLANG_ARGS = "--target=x86_64-pc-windows-msvc -fms-compatibility -fms-extensions -fdeclspec"`)
+Building on Windows seems to need this before compiling:
+
+1. Run `Developer Command Prompt for VS 2022`
+2. Go to your repo location
+3. `SET BINDGEN_EXTRA_CLANG_ARGS=--target=x86_64-pc-windows-msvc -fms-compatibility -fms-extensions -fdeclspec`
+4. `cargo build --release`
 
 The binary lands at `target/release/feedbook`.
 
