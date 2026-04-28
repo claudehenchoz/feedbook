@@ -71,13 +71,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cross --git https://github.com/cross-rs/cross --locked
-      - name: Build feedbook for Kindle (armv7 gnueabihf)
+      - name: Build feedbook for Kindle (armv7 musleabihf)
         run: cross build --release --target armv7-unknown-linux-musleabihf
       - name: Assemble install kit
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          STAGE="feedbook-kindle-paperwhite3-and-older-${VERSION}.zip"
+          STAGE="feedbook-kindle-paperwhite3-and-older-${VERSION}"
           cp -r install/kindle "${STAGE}"
           cp target/armv7-unknown-linux-musleabihf/release/feedbook \
               "${STAGE}/extensions/feedbook/feedbook"
@@ -90,11 +90,6 @@ jobs:
         with:
           name: ${{ env.STAGE }}
           path: ${{ env.STAGE }}.zip
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.STAGE }}.zip
-          generate_release_notes: true
-          fail_on_unmatched_files: true
 
   build-kindle-aarch64:
     needs: test
@@ -110,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          STAGE="feedbook-kindle-paperwhite4-and-newer-${VERSION}.zip"
+          STAGE="feedbook-kindle-paperwhite4-and-newer-${VERSION}"
           cp -r install/kindle "${STAGE}"
           cp target/aarch64-unknown-linux-musl/release/feedbook \
             "${STAGE}/extensions/feedbook/feedbook"
@@ -123,11 +118,6 @@ jobs:
         with:
           name: ${{ env.STAGE }}
           path: ${{ env.STAGE }}.zip
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.STAGE }}.zip
-          generate_release_notes: true
-          fail_on_unmatched_files: true
 
   build-windows:
     needs: test
