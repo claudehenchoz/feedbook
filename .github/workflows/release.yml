@@ -137,13 +137,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install dependencies on Windows
+        run: |
+          choco install cmake -y
+          choco install strawberryperl -y
+          choco install pkgconfiglite -y
+          choco install llvm -y
+          choco install nasm -y
+        shell: cmd
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run tests
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo test
 
       - name: Build feedbook for Windows
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --release
 
       - name: Install zip
@@ -177,6 +190,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install dependencies on macOS
+        run: |
+          brew update
+          brew install --formula cmake pkg-config llvm
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -229,6 +247,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install base dependencies on Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake perl pkg-config libclang-dev musl-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

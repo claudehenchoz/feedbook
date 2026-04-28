@@ -3,7 +3,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] wreq::Error),
 
     #[error("Feed parse error: {0}")]
     Feed(String),

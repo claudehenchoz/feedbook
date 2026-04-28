@@ -17,10 +17,10 @@ pub fn new_host_times() -> HostTimes {
 ///
 /// The lock is never held across an `.await` point.
 pub async fn throttled_get(
-    client: &reqwest::Client,
+    client: &wreq::Client,
     url: &str,
     times: &HostTimes,
-) -> reqwest::Result<reqwest::Response> {
+) -> wreq::Result<wreq::Response> {
     if let Ok(parsed) = url::Url::parse(url) {
         if let Some(host) = parsed.host_str().map(str::to_owned) {
             let min_gap = Duration::from_millis(THROTTLE_MS);
@@ -55,8 +55,8 @@ mod tests {
     use std::time::Instant;
     use httpmock::prelude::*;
 
-    fn test_client() -> reqwest::Client {
-        reqwest::Client::new()
+    fn test_client() -> wreq::Client {
+        wreq::Client::new()
     }
 
     #[tokio::test]

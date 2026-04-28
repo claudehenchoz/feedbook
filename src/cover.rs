@@ -15,7 +15,7 @@ const ROTATION_DEGREES: f32 = 5.0;
 /// site's homepage, falling back to `/favicon.ico`. Tries candidates largest-
 /// first and returns the first one whose bytes decode as a raster image
 /// at least 64 px wide/tall, or the first that decodes at all.
-pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<Vec<u8>> {
+pub async fn fetch_favicon(client: &wreq::Client, feed_url: &str) -> Option<Vec<u8>> {
     let parsed = url::Url::parse(feed_url).ok()?;
     let scheme = parsed.scheme();
     let original_host = parsed.host_str()?;
@@ -46,7 +46,7 @@ pub async fn fetch_favicon(client: &reqwest::Client, feed_url: &str) -> Option<V
 /// Tries to find a usable favicon for the site rooted at `base`.
 /// Scrapes <link rel="icon"> tags from the homepage, falls back to /favicon.ico,
 /// and returns the largest decodable raster image (preferring ≥64 px).
-async fn try_favicon_from_base(client: &reqwest::Client, base: &url::Url) -> Option<Vec<u8>> {
+async fn try_favicon_from_base(client: &wreq::Client, base: &url::Url) -> Option<Vec<u8>> {
     use dom_query::Document;
 
     let mut candidates: Vec<(u32, url::Url)> = Vec::new();

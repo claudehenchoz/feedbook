@@ -21,30 +21,30 @@ pub struct FetchOutcome {
 }
 
 pub async fn fetch_feed(
-    client: &reqwest::Client,
+    client: &wreq::Client,
     url: &str,
     cached_etag: Option<&str>,
     cached_last_modified: Option<&str>,
 ) -> Result<FetchOutcome, AppError> {
     let mut req = client.get(url);
     if let Some(etag) = cached_etag {
-        req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+        req = req.header(wreq::header::IF_NONE_MATCH, etag);
     }
     if let Some(lm) = cached_last_modified {
-        req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
+        req = req.header(wreq::header::IF_MODIFIED_SINCE, lm);
     }
     let response = req.send().await?;
 
     let etag = response.headers()
-        .get(reqwest::header::ETAG)
+        .get(wreq::header::ETAG)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let last_modified = response.headers()
-        .get(reqwest::header::LAST_MODIFIED)
+        .get(wreq::header::LAST_MODIFIED)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
-    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+    if response.status() == wreq::StatusCode::NOT_MODIFIED {
         return Ok(FetchOutcome { feed: None, etag, last_modified });
     }
 
@@ -121,8 +121,8 @@ mod tests {
   </entry>
 </feed>"#;
 
-    fn test_client() -> reqwest::Client {
-        reqwest::Client::new()
+    fn test_client() -> wreq::Client {
+        wreq::Client::new()
     }
 
     #[tokio::test]
