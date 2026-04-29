@@ -6,90 +6,68 @@ on:
       - 'v*'
 
 permissions:
-  contents: write  # needed to create releases
+  contents: write
 
 jobs:
-
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test
 
-  build-kobo:
+  # Merged Kobo and Kindle ARMv7 since they share the exact same target
+  build-armv7-readers:
     needs: test
-    name: Build Kobo install kit
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
-
-      - name: Build feedbook for Kobo (armv7 musl)
-        run: cross build --release --target armv7-unknown-linux-musleabihf
-
-      - name: Assemble install kit
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          STAGE="feedbook-kobo-${VERSION}"
-
-          # Copy the tracked kit skeleton into a staging dir
-          cp -r install/kobo "${STAGE}"
-
-          # Inject the freshly built binary
-          cp target/armv7-unknown-linux-musleabihf/release/feedbook \
-             "${STAGE}/.adds/feedbook/feedbook"
-          chmod +x "${STAGE}/.adds/feedbook/feedbook"
-          chmod +x "${STAGE}/.adds/feedbook/run.sh"
-
-          # Sanity check: confirm the binary is actually ARM
-          file "${STAGE}/.adds/feedbook/feedbook"
-
-          # Zip it, preserving permissions and dot-folders
-          zip -r "${STAGE}.zip" "${STAGE}"
-
-          echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
-
-      - name: Upload zip as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.STAGE }}
-          path: ${{ env.STAGE }}.zip
-
-  build-kindle-armv7:
-    needs: test
-    name: Build Kindle install kit (armv7 musl)
+    name: Build Kobo & Kindle (armv7 musl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cross --git https://github.com/cross-rs/cross --locked
-      - name: Build feedbook for Kindle (armv7 musleabihf)
+      - uses: Swatinem/rust-cache@v2
+      
+      # Use pre-compiled binaries instead of compiling `cross` from source
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build feedbook (armv7 musleabihf)
         run: cross build --release --target armv7-unknown-linux-musleabihf
-      - name: Assemble install kit
+
+      - name: Assemble Kobo & Kindle install kits
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          STAGE="feedbook-kindle-paperwhite3-and-older-${VERSION}"
-          cp -r install/kindle "${STAGE}"
-          cp target/armv7-unknown-linux-musleabihf/release/feedbook \
-              "${STAGE}/extensions/feedbook/feedbook"
-          chmod +x "${STAGE}/extensions/feedbook/feedbook"
-          chmod +x "${STAGE}/extensions/feedbook/bin/feedbook.sh"
-          file "${STAGE}/extensions/feedbook/feedbook"
-          zip -r "${STAGE}.zip" "${STAGE}"
-          echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@v4
+          
+          # --- Kobo Assembly ---
+          STAGE_KOBO="feedbook-kobo-${VERSION}"
+          cp -r install/kobo "${STAGE_KOBO}"
+          cp target/armv7-unknown-linux-musleabihf/release/feedbook "${STAGE_KOBO}/.adds/feedbook/feedbook"
+          chmod +x "${STAGE_KOBO}/.adds/feedbook/feedbook"
+          zip -r "${STAGE_KOBO}.zip" "${STAGE_KOBO}"
+          echo "STAGE_KOBO=${STAGE_KOBO}" >> "$GITHUB_ENV"
+
+          # --- Kindle Assembly ---
+          STAGE_KINDLE="feedbook-kindle-paperwhite3-and-older-${VERSION}"
+          cp -r install/kindle "${STAGE_KINDLE}"
+          cp target/armv7-unknown-linux-musleabihf/release/feedbook "${STAGE_KINDLE}/extensions/feedbook/feedbook"
+          chmod +x "${STAGE_KINDLE}/extensions/feedbook/feedbook" "${STAGE_KINDLE}/extensions/feedbook/bin/feedbook.sh"
+          zip -r "${STAGE_KINDLE}.zip" "${STAGE_KINDLE}"
+          echo "STAGE_KINDLE=${STAGE_KINDLE}" >> "$GITHUB_ENV"
+
+      - name: Upload Kobo Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.STAGE }}
-          path: ${{ env.STAGE }}.zip
+          name: ${{ env.STAGE_KOBO }}
+          path: ${{ env.STAGE_KOBO }}.zip
+
+      - name: Upload Kindle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE_KINDLE }}
+          path: ${{ env.STAGE_KINDLE }}.zip
 
   build-kindle-aarch64:
     needs: test
@@ -98,7 +76,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - name: Build feedbook for Kindle (aarch64 musl)
         run: cross build --release --target aarch64-unknown-linux-musl
       - name: Assemble install kit
@@ -107,11 +89,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           STAGE="feedbook-kindle-paperwhite4-and-newer-${VERSION}"
           cp -r install/kindle "${STAGE}"
-          cp target/aarch64-unknown-linux-musl/release/feedbook \
-            "${STAGE}/extensions/feedbook/feedbook"
-          chmod +x "${STAGE}/extensions/feedbook/feedbook"
-          chmod +x "${STAGE}/extensions/feedbook/bin/feedbook.sh"
-          file "${STAGE}/extensions/feedbook/feedbook"
+          cp target/aarch64-unknown-linux-musl/release/feedbook "${STAGE}/extensions/feedbook/feedbook"
+          chmod +x "${STAGE}/extensions/feedbook/feedbook" "${STAGE}/extensions/feedbook/bin/feedbook.sh"
           zip -r "${STAGE}.zip" "${STAGE}"
           echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
@@ -124,51 +103,28 @@ jobs:
     name: Build Windows x86_64
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies on Windows
-        run: |
-          choco install cmake -y
-          choco install strawberryperl -y
-          choco install pkgconfiglite -y
-          choco install llvm -y
-          choco install nasm -y
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: choco install cmake strawberryperl pkgconfiglite llvm nasm zip -y
         shell: cmd
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run tests
-        env:
-          RUSTFLAGS: "-C target-feature=+crt-static"
-        run: cargo test
-
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build feedbook for Windows
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --release
-
-      - name: Install zip
-        run: choco install zip -y
-
       - name: Assemble install kit
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           STAGE="feedbook-windows-x86_64-${VERSION}"
-
           mkdir "${STAGE}"
           cp target/release/feedbook.exe "${STAGE}/"
           cp install/desktop/feedbook.toml "${STAGE}/"
-
           zip -r "${STAGE}.zip" "${STAGE}"
-
           echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
-
-      - name: Upload zip as workflow artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.STAGE }}
           path: ${{ env.STAGE }}.zip
@@ -178,54 +134,33 @@ jobs:
     name: Build macOS universal binary
     runs-on: macos-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies on macOS
+      - uses: actions/checkout@v4
+      - name: Install dependencies
         run: |
           brew update
           brew install --formula cmake pkg-config llvm
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Add Rust targets
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
-
-      - name: Run tests
-        run: cargo test
-
       - name: Build feedbook for macOS arm64
         run: cargo build --release --target aarch64-apple-darwin
-
       - name: Build feedbook for macOS x86_64
         run: cargo build --release --target x86_64-apple-darwin
-
       - name: Assemble install kit
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           STAGE="feedbook-macos-universal-${VERSION}"
-
           mkdir "${STAGE}"
-
-          # Combine into a universal binary
           lipo -create -output "${STAGE}/feedbook" \
             target/aarch64-apple-darwin/release/feedbook \
             target/x86_64-apple-darwin/release/feedbook
           chmod +x "${STAGE}/feedbook"
-
-          # Confirm it's a fat binary
-          file "${STAGE}/feedbook"
-
           cp install/desktop/feedbook.toml "${STAGE}/"
-
           zip -r "${STAGE}.zip" "${STAGE}"
-
           echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
-
-      - name: Upload zip as workflow artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.STAGE }}
           path: ${{ env.STAGE }}.zip
@@ -235,42 +170,34 @@ jobs:
     name: Build Linux x86_64 (musl)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
-
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - name: Build feedbook for Linux (musl)
         run: cross build --release --target x86_64-unknown-linux-musl
-
       - name: Assemble install kit
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           STAGE="feedbook-linux-x86_64-${VERSION}"
-
           mkdir "${STAGE}"
           cp target/x86_64-unknown-linux-musl/release/feedbook "${STAGE}/"
           chmod +x "${STAGE}/feedbook"
           cp install/desktop/feedbook.toml "${STAGE}/"
-
           zip -r "${STAGE}.zip" "${STAGE}"
-
           echo "STAGE=${STAGE}" >> "$GITHUB_ENV"
-
-      - name: Upload zip as workflow artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.STAGE }}
           path: ${{ env.STAGE }}.zip
 
   release:
     name: Create GitHub Release
-    needs: [build-kobo, build-windows, build-macos, build-linux, build-kindle-armv7, build-kindle-aarch64]
+    needs: [build-armv7-readers, build-windows, build-macos, build-linux, build-kindle-aarch64]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -278,8 +205,7 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: Create GitHub Release and attach all zips
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*.zip
