@@ -1,8 +1,13 @@
 Feedbook for Kobo — quick install
 ==================================
 
-Prerequisite: NickelMenu must already be installed.
+Prerequisites: 
+
+  NickelMenu must already be installed.
   https://pgaskin.net/NickelMenu/#install
+
+  NickelDBus must also already be installed.
+  https://shermp.github.io/NickelDBus/
 
 1. Connect your Kobo via USB.
 

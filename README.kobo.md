@@ -4,11 +4,15 @@ Install Feedbook as a NickelMenu item and generate KEPUBs from RSS/Atom feeds di
 
 ## Prerequisites
 
-You need **NickelMenu** installed first. It's a launcher that adds custom entries to your Kobo's main menu, which is how you'll trigger Feedbook runs.
+1. You need **NickelMenu** installed first. It's a launcher that adds custom entries to your Kobo's main menu, which is how you'll trigger Feedbook runs.
+    
+    a. Install it from here: <https://pgaskin.net/NickelMenu/#install>
 
-Install it from here: <https://pgaskin.net/NickelMenu/#install>
+    b. Don't proceed until NickelMenu is working (you should see its menu entries in the Kobo UI).
 
-Don't proceed until NickelMenu is working (you should see its menu entries in the Kobo UI).
+2. Once NickelMenu is installed, also install **NickelDBus**. It's a tool that will be invisible, but that will allow Feedbook to draw messages on screen and trigger a library refresh.
+
+    a. Install it from here: <https://shermp.github.io/NickelDBus/>
 
 ## Install
 
