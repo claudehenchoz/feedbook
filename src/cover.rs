@@ -15,10 +15,31 @@ const ROTATION_DEGREES: f32 = 5.0;
 /// site's homepage, falling back to `/favicon.ico`. Tries candidates largest-
 /// first and returns the first one whose bytes decode as a raster image
 /// at least 64 px wide/tall, or the first that decodes at all.
-pub async fn fetch_favicon(client: &wreq::Client, feed_url: &str) -> Option<Vec<u8>> {
+///
+/// `feed_link` is the publication URL from the feed's channel/link element and
+/// is tried first, since feed URLs are often hosted on a CDN or different domain.
+pub async fn fetch_favicon(client: &wreq::Client, feed_url: &str, feed_link: Option<&str>) -> Option<Vec<u8>> {
     let parsed = url::Url::parse(feed_url).ok()?;
     let scheme = parsed.scheme();
     let original_host = parsed.host_str()?;
+
+    // Attempt 0: use the feed's channel/link element (the publication site).
+    // This is the most reliable source when the feed is hosted on a different domain,
+    // e.g. feeds.feedburner.com serving content from arstechnica.com.
+    if let Some(link) = feed_link {
+        if let Ok(parsed_link) = url::Url::parse(link) {
+            if let Some(link_host) = parsed_link.host_str() {
+                // Skip if it's the same host we'll try anyway in attempt 1.
+                if link_host != original_host {
+                    if let Ok(base0) = url::Url::parse(&format!("{}://{}", parsed_link.scheme(), link_host)) {
+                        if let Some(bytes) = try_favicon_from_base(client, &base0).await {
+                            return Some(bytes);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Attempt 1: use the feed URL's host as-is.
     // For Feedburner-style feeds (feeds.example.com/foo) this often won't have

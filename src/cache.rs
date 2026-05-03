@@ -64,6 +64,7 @@ pub fn open_db(path: &PathBuf) -> Result<Connection, AppError> {
     // Migrations for existing installs — succeed on upgrade, ignored on fresh create
     let _ = conn.execute_batch("ALTER TABLE covers ADD COLUMN width  INTEGER NOT NULL DEFAULT 0");
     let _ = conn.execute_batch("ALTER TABLE covers ADD COLUMN height INTEGER NOT NULL DEFAULT 0");
+    let _ = conn.execute_batch("ALTER TABLE feed_headers ADD COLUMN feed_link TEXT");
     // Drop old-size cover templates after dimension changes (1264×1680 → 632×840)
     let _ = conn.execute_batch("DELETE FROM covers WHERE width != 632 OR height != 840");
     Ok(conn)
@@ -265,11 +266,12 @@ pub struct FeedHeaders {
     pub last_modified: Option<String>,
     pub feed_title:    Option<String>,
     pub feed_date:     Option<String>,
+    pub feed_link:     Option<String>,
 }
 
 pub fn get_feed_headers(conn: &Connection, feed_url: &str) -> Result<Option<FeedHeaders>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT etag, last_modified, feed_title, feed_date FROM feed_headers WHERE feed_url = ?1",
+        "SELECT etag, last_modified, feed_title, feed_date, feed_link FROM feed_headers WHERE feed_url = ?1",
     )?;
     let mut rows = stmt.query(params![feed_url])?;
     if let Some(row) = rows.next()? {
@@ -278,6 +280,7 @@ pub fn get_feed_headers(conn: &Connection, feed_url: &str) -> Result<Option<Feed
             last_modified: row.get(1)?,
             feed_title:    row.get(2)?,
             feed_date:     row.get(3)?,
+            feed_link:     row.get(4)?,
         }));
     }
     Ok(None)
@@ -285,9 +288,9 @@ pub fn get_feed_headers(conn: &Connection, feed_url: &str) -> Result<Option<Feed
 
 pub fn store_feed_headers(conn: &Connection, feed_url: &str, h: &FeedHeaders) -> Result<(), AppError> {
     conn.execute(
-        "INSERT OR REPLACE INTO feed_headers (feed_url, etag, last_modified, feed_title, feed_date)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![feed_url, h.etag, h.last_modified, h.feed_title, h.feed_date],
+        "INSERT OR REPLACE INTO feed_headers (feed_url, etag, last_modified, feed_title, feed_date, feed_link)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![feed_url, h.etag, h.last_modified, h.feed_title, h.feed_date, h.feed_link],
     )?;
     Ok(())
 }
@@ -551,6 +554,7 @@ mod tests {
             last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string()),
             feed_title:    Some("My Feed".to_string()),
             feed_date:     Some("2024-01-01T00:00:00Z".to_string()),
+            feed_link:     Some("https://example.com/".to_string()),
         };
         store_feed_headers(&conn, "https://example.com/feed", &h).unwrap();
         let result = get_feed_headers(&conn, "https://example.com/feed").unwrap().unwrap();
@@ -558,6 +562,7 @@ mod tests {
         assert_eq!(result.last_modified.as_deref(), Some("Mon, 01 Jan 2024 00:00:00 GMT"));
         assert_eq!(result.feed_title.as_deref(), Some("My Feed"));
         assert_eq!(result.feed_date.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(result.feed_link.as_deref(), Some("https://example.com/"));
     }
 
     #[test]
@@ -573,11 +578,11 @@ mod tests {
         let feed = "https://example.com/feed";
         store_feed_headers(&conn, feed, &FeedHeaders {
             etag: Some("\"v1\"".to_string()), last_modified: None,
-            feed_title: Some("Old Title".to_string()), feed_date: None,
+            feed_title: Some("Old Title".to_string()), feed_date: None, feed_link: None,
         }).unwrap();
         store_feed_headers(&conn, feed, &FeedHeaders {
             etag: Some("\"v2\"".to_string()), last_modified: None,
-            feed_title: Some("New Title".to_string()), feed_date: None,
+            feed_title: Some("New Title".to_string()), feed_date: None, feed_link: None,
         }).unwrap();
         let result = get_feed_headers(&conn, feed).unwrap().unwrap();
         assert_eq!(result.etag.as_deref(), Some("\"v2\""));
@@ -588,7 +593,7 @@ mod tests {
     fn store_feed_headers_nullable_fields() {
         let conn = mem_db();
         store_feed_headers(&conn, "https://example.com/feed", &FeedHeaders {
-            etag: None, last_modified: None, feed_title: None, feed_date: None,
+            etag: None, last_modified: None, feed_title: None, feed_date: None, feed_link: None,
         }).unwrap();
         let result = get_feed_headers(&conn, "https://example.com/feed").unwrap().unwrap();
         assert!(result.etag.is_none());

@@ -11,6 +11,7 @@ pub struct FeedItem {
 pub struct FeedData {
     pub title: String,
     pub date:  Option<DateTime<Utc>>,
+    pub link:  Option<String>,
     pub items: Vec<FeedItem>,
 }
 
@@ -61,6 +62,8 @@ pub async fn fetch_feed(
         .map(|t| t.content)
         .unwrap_or_else(|| "Feed".to_string());
 
+    let feed_link = feed.links.into_iter().next().map(|l| l.href);
+
     let items: Vec<FeedItem> = feed
         .entries
         .into_iter()
@@ -80,7 +83,7 @@ pub async fn fetch_feed(
         .or_else(|| items.iter().filter_map(|i| i.date).max());
 
     Ok(FetchOutcome {
-        feed: Some(FeedData { title: feed_title, date: feed_date, items }),
+        feed: Some(FeedData { title: feed_title, date: feed_date, link: feed_link, items }),
         etag,
         last_modified,
     })

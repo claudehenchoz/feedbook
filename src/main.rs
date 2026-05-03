@@ -99,7 +99,7 @@ async fn run_feed(
         run_log.println(&format!("[TIMING] feed fetch: {:?}{}", t.elapsed(), suffix));
     }
 
-    let (feed_title, feed_date, mut feed_items) = match feed_result {
+    let (feed_title, feed_date, mut feed_items, feed_link) = match feed_result {
         Some(data) => {
             let title = cfg.name.clone().unwrap_or_else(|| data.title.clone());
             cache::store_feed_headers(&conn, &cfg.url, &cache::FeedHeaders {
@@ -107,10 +107,12 @@ async fn run_feed(
                 last_modified: new_lm.or_else(|| cached_lm.map(str::to_owned)),
                 feed_title:    Some(data.title.clone()),
                 feed_date:     data.date.map(|d| d.to_rfc3339()),
+                feed_link:     data.link.clone(),
             })?;
-            (title, data.date, data.items)
+            (title, data.date, data.items, data.link)
         }
         None => {
+            let link  = cached_headers.as_ref().and_then(|h| h.feed_link.clone());
             let title = cfg.name.clone()
                 .or_else(|| cached_headers.as_ref().and_then(|h| h.feed_title.clone()))
                 .unwrap_or_else(|| "Feed".to_string());
@@ -118,7 +120,7 @@ async fn run_feed(
                 .and_then(|h| h.feed_date.as_deref())
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc));
-            (title, date, vec![])
+            (title, date, vec![], link)
         }
     };
     run_log.println(&format!("Feed: {}{}", feed_title, if not_modified { " (unchanged)" } else { "" }));
@@ -343,8 +345,9 @@ async fn run_feed(
         if !had_cached_template {
             let client_favicon  = client.clone();
             let url_for_favicon = cfg.url.clone();
+            let link_for_favicon = feed_link.clone();
             Some(tokio::spawn(async move {
-                cover::fetch_favicon(&client_favicon, &url_for_favicon).await
+                cover::fetch_favicon(&client_favicon, &url_for_favicon, link_for_favicon.as_deref()).await
             }))
         } else {
             None
