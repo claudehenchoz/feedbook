@@ -24,6 +24,32 @@ use futures::StreamExt;
 use log::LogSink;
 use tokio::sync::{Mutex, Semaphore};
 
+#[derive(Clone, Copy)]
+struct Concurrency {
+    feeds:    usize,
+    articles: usize,
+    images:   usize,
+}
+
+fn auto_concurrency() -> Concurrency {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let avail_mb = sys.available_memory() / 1024 / 1024;
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    if avail_mb < 300 {
+        Concurrency { feeds: 2, articles: 2, images: 2 }
+    } else if avail_mb < 800 {
+        Concurrency { feeds: 3, articles: 3, images: 4 }
+    } else if cores >= 4 {
+        Concurrency { feeds: 5, articles: 5, images: 8 }
+    } else {
+        Concurrency { feeds: 3, articles: 4, images: 6 }
+    }
+}
+
 /// Returns the hostname of `url` (e.g. `hnrss.org`) for use as a log line prefix.
 fn feed_log_prefix(url: &str) -> String {
     url::Url::parse(url)
@@ -74,6 +100,7 @@ async fn run_feed(
     cfg: &ResolvedFeedConfig,
     client: &wreq::Client,
     log_file: Option<log::LogFile>,
+    concurrency: Concurrency,
 ) -> Result<FeedOutcome, AppError> {
     let db_path = resolve_db_path(cfg)?;
     let mut conn = cache::open_db(&db_path)?;
@@ -137,7 +164,7 @@ async fn run_feed(
     // ── Shared pipeline state ─────────────────────────────────────────────────
 
     let host_times = throttle::new_host_times();
-    let image_sem  = Arc::new(Semaphore::new(if cfg!(all(target_arch = "arm", target_env = "musl")) { 3 } else { 8 }));
+    let image_sem  = Arc::new(Semaphore::new(concurrency.images));
     let sanitizer  = sanitize::build_sanitizer();
 
     let cached_sha1s: HashSet<String> = if cfg.no_images {
@@ -160,8 +187,8 @@ async fn run_feed(
 
     // ── Arm A: per-article scrape → per-article image download ───────────────
 
-    let img_concurrency     = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 4 };
-    let article_concurrency = if cfg!(all(target_arch = "arm", target_env = "musl")) { 2usize } else { 5 };
+    let img_concurrency     = concurrency.images;
+    let article_concurrency = concurrency.articles;
 
     let no_images = cfg.no_images;
     let max_w     = cfg.max_image_width;
@@ -524,6 +551,15 @@ async fn main() -> Result<(), AppError> {
         }
     };
 
+    let mut concurrency = auto_concurrency();
+    if let Some((ref raw_config, _)) = config_result {
+        if let Some(ref rc) = raw_config.concurrency {
+            if let Some(f) = rc.feeds    { concurrency.feeds    = f; }
+            if let Some(a) = rc.articles { concurrency.articles = a; }
+            if let Some(i) = rc.images   { concurrency.images   = i; }
+        }
+    }
+
     let client = wreq::Client::builder()
         .emulation(wreq_util::Emulation::Firefox139)
         .timeout(Duration::from_secs(10))
@@ -539,7 +575,7 @@ async fn main() -> Result<(), AppError> {
             async move {
                 let name = cfg.name.clone()
                     .unwrap_or_else(|| util::extract_domain_title(&cfg.url));
-                let outcome = match run_feed(&cfg, &client, log_file).await {
+                let outcome = match run_feed(&cfg, &client, log_file, concurrency).await {
                     Ok(o) => Ok(o),
                     Err(e) => {
                         eprintln!("{}: Error: {e}", feed_log_prefix(&cfg.url));
@@ -549,7 +585,7 @@ async fn main() -> Result<(), AppError> {
                 (name, outcome)
             }
         })
-        .buffer_unordered(5)
+        .buffer_unordered(concurrency.feeds)
         .collect::<Vec<_>>()
         .await;
 

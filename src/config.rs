@@ -5,6 +5,14 @@ use crate::error::AppError;
 
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
+pub struct RawConcurrency {
+    pub feeds:    Option<usize>,
+    pub articles: Option<usize>,
+    pub images:   Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RawDefaults {
     pub outfolder:       Option<String>,
     pub dbpath:          Option<String>,
@@ -59,7 +67,8 @@ impl RawFeed {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RawConfig {
-    pub defaults: Option<RawDefaults>,
+    pub defaults:    Option<RawDefaults>,
+    pub concurrency: Option<RawConcurrency>,
     #[serde(default)]
     pub feeds: Vec<RawFeed>,
 }

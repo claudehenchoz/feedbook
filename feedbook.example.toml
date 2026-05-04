@@ -9,6 +9,18 @@
 # You can also pass an explicit path: feedbook --config /path/to/feedbook.toml
 
 # ============================================================
+# [concurrency] — override the runtime-detected concurrency limits.
+# feedbook probes available memory and CPU cores on startup and picks
+# sensible defaults automatically; use this section to override.
+# All keys are optional; omit any you want to keep auto-detected.
+# ============================================================
+
+# [concurrency]
+# feeds    = 5   # parallel feed fetches
+# articles = 5   # parallel article scrapes per feed
+# images   = 8   # parallel image downloads (also sets the global semaphore cap)
+
+# ============================================================
 # [defaults] — applied to every feed unless overridden below.
 # All keys are optional; omit any you want to leave at the
 # built-in default.
